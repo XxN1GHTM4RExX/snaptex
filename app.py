@@ -1,88 +1,101 @@
-import streamlit as st
+import io
 import requests
+import streamlit as st
+from PIL import Image
 
-# Set page configuration
+# -----------------------------------------------------------------------------
+# App Configuration & Backend Setup
+# -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="SnapTex - Academic Document Processor",
     page_icon="📄",
     layout="centered"
 )
 
-# Backend API URLs
-# Replace http://127.0.0.1:8000 with your actual Render API URL
-# No trailing slash at the end
-API_BASE_URL = "https://snaptex001.streamlit.app/"
+# Replace with your actual live Render API URL (no trailing slash!)
+API_BASE_URL = "https://snaptex001.streamlit.app"
+
+st.title("📄 SnapTex")
+st.subheader("Convert handwritten notes & math formulas into editable LaTeX & Word docs")
 
 
-PROCESS_URL = f"{API_BASE_URL}/process-document"
-EXPORT_URL = f"{API_BASE_URL}/export-docx"
+# -----------------------------------------------------------------------------
+# Helper Functions
+# -----------------------------------------------------------------------------
+def compress_image(uploaded_file, max_dimension=1600, quality=85):
+    """
+    Resizes and compresses large images taken on mobile phones
+    to prevent HTTP 413 (Request Entity Too Large) errors.
+    """
+    image = Image.open(uploaded_file)
 
-st.title("📄 SnapTex Document OCR")
-st.write("Upload a handwritten or printed academic document to convert it into editable text and LaTeX equations.")
+    # Convert RGBA/Palette images to RGB before saving as JPEG
+    if image.mode in ("RGBA", "P"):
+        image = image.convert("RGB")
 
-# File Uploader
-uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
+    # Resize while maintaining aspect ratio
+    image.thumbnail((max_dimension, max_dimension))
+
+    # Save to memory stream as compressed JPEG
+    img_byte_arr = io.BytesIO()
+    image.save(img_byte_arr, format="JPEG", quality=quality)
+    return img_byte_arr.getvalue()
+
+
+# -----------------------------------------------------------------------------
+# Interface & User Interactions
+# -----------------------------------------------------------------------------
+uploaded_file = st.file_uploader(
+    "Upload a document photo or handwritten page",
+    type=["jpg", "jpeg", "png"]
+)
 
 if uploaded_file is not None:
-    # Display uploaded image preview
+    # Preview uploaded image
     st.image(uploaded_file, caption="Uploaded Document", use_column_width=True)
 
     if st.button("Process Document", type="primary"):
-        with st.spinner("Analyzing image quality and running OCR..."):
+        with st.spinner("Processing document & converting formulas..."):
             try:
-                # Prepare file payload for FastAPI
-                files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
-                response = requests.post(PROCESS_URL, files=files)
+                # 1. Compress image to stay within server payload limits
+                compressed_bytes = compress_image(uploaded_file)
+                files = {"file": ("document.jpg", compressed_bytes, "image/jpeg")}
+
+                # 2. Call live FastAPI backend endpoint
+                response = requests.post(f"{API_BASE_URL}/process-document", files=files)
 
                 if response.status_code == 200:
                     data = response.json()
 
-                    if data.get("is_blurry"):
-                        st.error(f"❌ Document Rejected: {data.get('message')}")
-                        st.info(f"Blur Score: {data.get('blur_score'):.2f} (Threshold: 150.0)")
-                    else:
-                        st.success("✅ Document processed successfully!")
-                        st.session_state["transcription"] = data.get("transcription")
-                        st.session_state["filename"] = uploaded_file.name.split('.')[0]
+                    st.success("Document processed successfully!")
+
+                    # Display detected text & LaTeX output
+                    st.subheader("Extracted LaTeX & Text")
+                    latex_content = data.get("latex", data.get("text", ""))
+                    st.code(latex_content, language="latex")
+
+                    # Display image quality metrics if returned
+                    if "blur_score" in data:
+                        st.caption(f"Image Blur Score: {data['blur_score']:.2f}")
+
+                    # Option to download generated Word document (.docx)
+                    if "docx_base64" in data or "download_url" in data:
+                        # Handle export request if backend provides export endpoint
+                        export_resp = requests.post(
+                            f"{API_BASE_URL}/export-docx",
+                            json={"latex": latex_content}
+                        )
+                        if export_resp.status_code == 200:
+                            st.download_button(
+                                label="📥 Download Word Document (.docx)",
+                                data=export_resp.content,
+                                file_name="snaptex_output.docx",
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                            )
                 else:
                     st.error(f"Error {response.status_code}: {response.text}")
 
             except requests.exceptions.ConnectionError:
-                st.error(
-                    "Could not connect to the FastAPI backend. Ensure your Uvicorn server is running on http://127.0.0.1:8000.")
-
-# Display transcription and export options if available
-if "transcription" in st.session_state and st.session_state["transcription"]:
-    st.subheader("Transcribed Content & LaTeX")
-
-    # Display editable text area containing the transcription
-    transcription_text = st.text_area(
-        "Edit transcription before export if needed:",
-        value=st.session_state["transcription"],
-        height=300
-    )
-
-    st.subheader("Rendered Preview")
-    st.markdown(transcription_text)
-
-    # Download DOCX Button
-    if st.button("Generate & Download DOCX"):
-        with st.spinner("Generating Word document with Pandoc..."):
-            try:
-                payload = {
-                    "transcription": transcription_text,
-                    "filename": st.session_state.get("filename", "SnapTex_Doc")
-                }
-                export_response = requests.post(EXPORT_URL, data=payload)
-
-                if export_response.status_code == 200:
-                    st.download_button(
-                        label="💾 Click Here to Save .docx File",
-                        data=export_response.content,
-                        file_name=f"{st.session_state.get('filename', 'SnapTex_Doc')}.docx",
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                    )
-                else:
-                    st.error("Failed to generate DOCX file.")
+                st.error("Could not connect to backend server. Please verify the API_BASE_URL in app.py.")
             except Exception as e:
-                st.error(f"Export error: {str(e)}")
+                st.error(f"An unexpected error occurred: {str(e)}")
