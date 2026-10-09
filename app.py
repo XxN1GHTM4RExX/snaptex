@@ -13,7 +13,7 @@ st.set_page_config(
 )
 
 # Ensure this matches your live Render API URL without a trailing slash!
-API_BASE_URL = "https://snaptex001.streamlit.app"
+API_BASE_URL = "https://snaptex.onrender.com"
 
 st.title("📄 SnapTex")
 st.subheader("Convert handwritten notes & math formulas into editable LaTeX & Word docs")
