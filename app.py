@@ -13,7 +13,7 @@ st.set_page_config(
 )
 
 # Ensure this matches your live Render API URL without a trailing slash!
-API_BASE_URL = "https://snaptex.onrender.com"
+API_BASE_URL = "https://snaptex.onrender.com"  # Check your exact Render URL name!
 
 st.title("📄 SnapTex")
 st.subheader("Convert handwritten notes & math formulas into editable LaTeX & Word docs")
@@ -28,15 +28,9 @@ def compress_image(uploaded_file, max_dimension=1600, quality=85):
     to prevent HTTP 413 (Request Entity Too Large) errors.
     """
     image = Image.open(uploaded_file)
-
-    # Convert RGBA or Palette images to RGB for JPEG format
     if image.mode in ("RGBA", "P"):
         image = image.convert("RGB")
-
-    # Resize while maintaining aspect ratio
     image.thumbnail((max_dimension, max_dimension))
-
-    # Save to memory stream as compressed JPEG
     img_byte_arr = io.BytesIO()
     image.save(img_byte_arr, format="JPEG", quality=quality)
     return img_byte_arr.getvalue()
@@ -51,59 +45,63 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
-    # Preview uploaded image
     st.image(uploaded_file, caption="Uploaded Document", use_column_width=True)
 
     if st.button("Process Document", type="primary"):
-        with st.spinner("Processing document & converting formulas ( Render backend may take 30s to wake up)..."):
+        with st.spinner("Processing document & converting formulas..."):
             try:
-                # 1. Compress image to stay within server payload limits
+                # 1. Compress image
                 compressed_bytes = compress_image(uploaded_file)
                 files = {"file": ("document.jpg", compressed_bytes, "image/jpeg")}
 
-                # 2. Send POST request to FastAPI backend
+                # 2. Call backend OCR endpoint
                 response = requests.post(f"{API_BASE_URL}/process-document", files=files, timeout=60)
 
-                # 3. Handle non-200 HTTP statuses
                 if response.status_code != 200:
                     st.error(f"Backend Server Error ({response.status_code}):")
-                    st.text(response.text[:500])  # Display raw text error snippet safely
+                    st.text(response.text[:500])
                 else:
-                    # 4. Safely parse JSON response
                     try:
                         data = response.json()
                         st.success("Document processed successfully!")
 
-                        # Display detected text / LaTeX output
+                        # Extract returned text/latex content
+                        latex_content = data.get("latex") or data.get("text") or data.get(
+                            "extracted_text") or "No text detected."
+
                         st.subheader("Extracted LaTeX & Text")
-                        latex_content = data.get("latex", data.get("text", ""))
                         st.code(latex_content, language="latex")
 
-                        # Display blur metric if available
                         if "blur_score" in data:
                             st.caption(f"Image Blur Score: {data['blur_score']:.2f}")
 
-                        # Download generated Word document (.docx) if available
-                        if "docx_base64" in data or "download_url" in data:
-                            export_resp = requests.post(
-                                f"{API_BASE_URL}/export-docx",
-                                json={"latex": latex_content},
-                                timeout=30
-                            )
-                            if export_resp.status_code == 200:
-                                st.download_button(
-                                    label="📥 Download Word Document (.docx)",
-                                    data=export_resp.content,
-                                    file_name="snaptex_output.docx",
-                                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        # ALWAYS show download button for .docx export
+                        if latex_content and latex_content != "No text detected.":
+                            st.divider()
+                            with st.spinner("Preparing Word Document download..."):
+                                export_resp = requests.post(
+                                    f"{API_BASE_URL}/export-docx",
+                                    json={"latex": latex_content},
+                                    timeout=30
                                 )
+                                if export_resp.status_code == 200:
+                                    st.download_button(
+                                        label="📥 Download Word Document (.docx)",
+                                        data=export_resp.content,
+                                        file_name="snaptex_output.docx",
+                                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                    )
+                                else:
+                                    st.warning(
+                                        "Could not generate .docx file automatically, but you can copy the LaTeX code above!")
+
                     except ValueError:
-                        st.error("Received non-JSON output from backend (Render may still be waking up):")
+                        st.error("Received non-JSON output from backend.")
                         st.text(response.text[:500])
 
             except requests.exceptions.Timeout:
-                st.error("The backend server timed out while waking up. Please try clicking 'Process Document' again!")
+                st.error("The backend server timed out. Please click 'Process Document' again!")
             except requests.exceptions.ConnectionError:
-                st.error(f"Could not reach backend at '{API_BASE_URL}'. Please verify your Render URL in app.py.")
+                st.error(f"Could not reach backend at '{API_BASE_URL}'.")
             except Exception as e:
                 st.error(f"An unexpected error occurred: {str(e)}")
