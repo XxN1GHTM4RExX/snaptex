@@ -10,7 +10,11 @@ st.set_page_config(
 
 # Backend API URLs
 # Replace http://127.0.0.1:8000 with your actual Render API URL
-API_BASE_URL = "https://snaptex-api.onrender.com"
+# No trailing slash at the end
+API_BASE_URL = "https://snaptex001.streamlit.app/"
+
+# In your process button block:
+response = requests.post(f"{API_BASE_URL}/process-document", files=files)
 PROCESS_URL = f"{API_BASE_URL}/process-document"
 EXPORT_URL = f"{API_BASE_URL}/export-docx"
 
