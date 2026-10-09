@@ -9,7 +9,8 @@ st.set_page_config(
 )
 
 # Backend API URLs
-API_BASE_URL = "http://127.0.0.1:8000"
+# Replace http://127.0.0.1:8000 with your actual Render API URL
+API_BASE_URL = "https://snaptex-api.onrender.com"
 PROCESS_URL = f"{API_BASE_URL}/process-document"
 EXPORT_URL = f"{API_BASE_URL}/export-docx"
 
