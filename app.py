@@ -67,7 +67,7 @@ if uploaded_file is not None:
 
                         # Extract returned text/latex content
                         latex_content = data.get("latex") or data.get("text") or data.get(
-                            "extracted_text") or "No text detected."
+                            "extracted_text") or f"Keys received: {list(data.keys())}"
 
                         st.subheader("Extracted LaTeX & Text")
                         st.code(latex_content, language="latex")
