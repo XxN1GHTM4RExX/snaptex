@@ -7,7 +7,7 @@ from google import genai
 
 def process_image_with_gemini(image_bytes: bytes) -> dict:
     """
-    Safely processes image bytes using Gemini API with automatic retries for 503 traffic spikes.
+    Safely processes image bytes using Gemini API with optimized retries to prevent backend timeouts.
     """
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -28,10 +28,10 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
         "Return ONLY the transcribed text and LaTeX code, without any introductory or conversational text."
     )
 
-    max_retries = 3
+    max_retries = 2
     for attempt in range(max_retries):
         try:
-            # Using gemini-3.8-flash as required by Google GenAI v1beta
+            # Using gemini-3.8-flash as mandated by Google GenAI v1beta
             response = client.models.generate_content(
                 model="gemini-3.8-flash",
                 contents=[image, prompt]
@@ -43,21 +43,21 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
         except Exception as e:
             error_msg = str(e)
 
-            # If 503 (high demand spike), wait 2 seconds and retry automatically
+            # Handle 503 high demand spikes with short 1s pause
             if "503" in error_msg or "UNAVAILABLE" in error_msg:
                 if attempt < max_retries - 1:
-                    time.sleep(2)
+                    time.sleep(1)
                     continue
                 return {
-                    "latex": "Google AI servers are currently experiencing high demand (503). Please wait 10–15 seconds and click 'Process Document' again.",
+                    "latex": "Google AI servers are currently experiencing high demand (503). Please wait 10 seconds and try again.",
                     "text": "Google AI servers high demand (503)."
                 }
 
-            # If 429 (quota limit hit)
+            # Handle 429 quota limit hit
             if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
                 return {
-                    "latex": "Rate Limit Exceeded: Free tier quota reached for gemini-3.8-flash. Please wait a short while before trying again.",
-                    "text": "Rate Limit Exceeded: Free tier quota reached."
+                    "latex": "Rate Limit Exceeded: Daily or per-minute quota reached for gemini-3.8-flash. Please wait a short while before trying again.",
+                    "text": "Rate Limit Exceeded."
                 }
 
             # General exception fallback
