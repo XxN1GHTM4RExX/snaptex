@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pypandoc
 from docx import Document
-from docx.shared import Pt, RGBColor, Inches
+from docx.shared import Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 from ocr_engine import process_image_with_gemini
@@ -80,11 +80,11 @@ def latex_to_unicode_math(text: str) -> str:
         r'\max': 'max',
     }
     cleaned = text
-    for latex, unicode_char in replacements.items():
-        cleaned = cleaned.replace(latex, unicode_char)
+    for latex_pattern, unicode_char in replacements.items():
+        cleaned = cleaned.replace(latex_pattern, unicode_char)
 
-    # Strip remaining math delimiters
-    cleaned = cleaned.replace('$$', '').replace('$', '')
+    # Strip remaining math delimiters and raw inline bold tags
+    cleaned = cleaned.replace('$$', '').replace('$', '').replace('**', '')
     return cleaned
 
 
@@ -104,15 +104,14 @@ async def export_docx(payload: ExportRequest):
     except Exception:
         pass
 
-    # Attempt 2: Direct python-docx document generation (Guaranteed Success)
+    # Attempt 2: Clean python-docx document builder without raw ### tags
     try:
         doc = Document()
 
-        # Title Header
+        # Document Header
         title = doc.add_heading('SnapTex - Transcribed Notes', level=1)
         title.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-        # Add horizontal rule spacing
         p_sub = doc.add_paragraph()
         p_sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
         run_sub = p_sub.add_run('Generated automatically via SnapTex OCR Engine')
@@ -126,11 +125,25 @@ async def export_docx(payload: ExportRequest):
         lines = payload.latex.split('\n')
         for line in lines:
             stripped = line.strip()
-            if not stripped:
+            if not stripped or stripped == '---':
                 continue
 
-            # Check for display math equations ($$ ... $$)
-            if stripped.startswith('$$') or stripped.endswith('$$'):
+            # Strip Markdown Heading tags dynamically
+            if stripped.startswith('#### '):
+                heading_text = latex_to_unicode_math(stripped.replace('#### ', ''))
+                h = doc.add_heading(heading_text, level=3)
+                h.style.font.name = 'Calibri'
+            elif stripped.startswith('### '):
+                heading_text = latex_to_unicode_math(stripped.replace('### ', ''))
+                h = doc.add_heading(heading_text, level=2)
+                h.style.font.name = 'Calibri'
+            elif stripped.startswith('## '):
+                heading_text = latex_to_unicode_math(stripped.replace('## ', ''))
+                h = doc.add_heading(heading_text, level=1)
+                h.style.font.name = 'Calibri'
+
+            # Center-aligned display math equations ($$ ... $$)
+            elif stripped.startswith('$$') or stripped.endswith('$$'):
                 math_line = latex_to_unicode_math(stripped)
                 p = doc.add_paragraph()
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -138,9 +151,10 @@ async def export_docx(payload: ExportRequest):
                 run.font.name = 'Cambria Math'
                 run.font.size = Pt(12)
                 run.font.bold = True
-                run.font.color.rgb = RGBColor(0, 51, 102)  # Dark Blue styling
+                run.font.color.rgb = RGBColor(0, 51, 102)
+
+            # Standard body paragraphs
             else:
-                # Regular text and inline math
                 clean_text = latex_to_unicode_math(stripped)
                 p = doc.add_paragraph(clean_text)
                 p.style.font.name = 'Calibri'
