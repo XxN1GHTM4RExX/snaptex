@@ -60,7 +60,7 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
                     "text": "Rate Limit Exceeded: Free tier quota reached."
                 }
 
-            # Other errors
+            # General exception fallback
             return {
                 "latex": f"OCR Processing Error: {error_msg}",
                 "text": f"OCR Processing Error: {error_msg}"
