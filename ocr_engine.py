@@ -28,9 +28,9 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
             "Return ONLY the transcribed text and LaTeX code, without any introductory or conversational text."
         )
 
-        # Uses gemini-1.5-flash for stable free-tier quota & compatibility with new API keys
+        # Updated to gemini-2.0-flash for v1beta compatibility
         response = client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-2.0-flash",
             contents=[image, prompt]
         )
 
