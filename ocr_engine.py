@@ -28,9 +28,9 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
             "Return ONLY the transcribed text and LaTeX code, without any introductory or conversational text."
         )
 
-        # Updated to gemini-2.0-flash for v1beta compatibility
+        # Using gemini-3.8-flash as required by Google GenAI v1beta
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-3.8-flash",
             contents=[image, prompt]
         )
 
@@ -41,8 +41,8 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
         error_msg = str(e)
         if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
             return {
-                "latex": "Rate Limit Exceeded: You hit the free tier quota. Please wait a few minutes before trying again.",
-                "text": "Rate Limit Exceeded: You hit the free tier quota."
+                "latex": "Rate Limit Exceeded: Free tier quota reached for gemini-3.8-flash. Please wait a short while or try again later.",
+                "text": "Rate Limit Exceeded: Free tier quota reached."
             }
 
         return {
