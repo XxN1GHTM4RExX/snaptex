@@ -50,30 +50,17 @@ async def process_document(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 
-
 @app.post("/export-docx")
 async def export_docx(payload: ExportRequest):
     DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
-    # 1. Primary Attempt: Use Pandoc with markdown+tex_math_dollars extension
-    # This instructs Pandoc to convert $...$ and $$...$$ directly into Word native math (OMML)
-    try:
-        output_bytes = pypandoc.convert_text(
-            payload.latex,
-            to='docx',
-            format='markdown+tex_math_dollars+raw_tex',
-            outputfile=None
-        )
-        return Response(content=output_bytes, media_type=DOCX_MIME)
-    except Exception:
-        pass  # Fall back if pandoc fails on specific raw tex blocks
+    # Pre-process LaTeX string to remove unsupported Pandoc formatting directives
+    cleaned_latex = payload.latex.replace(r"\qquad", "    ")
 
-    # 2. Secondary Attempt: Pure LaTeX input format for Pandoc
+    # 1. Primary Attempt: Direct LaTeX format conversion using Pandoc
     try:
-        # Wrap in a minimal LaTeX document body for Pandoc parser
-        full_tex = f"\\documentclass{{article}}\n\\begin{{document}}\n{payload.latex}\n\\end{{document}}"
         output_bytes = pypandoc.convert_text(
-            full_tex,
+            cleaned_latex,
             to='docx',
             format='latex',
             outputfile=None
@@ -82,28 +69,14 @@ async def export_docx(payload: ExportRequest):
     except Exception:
         pass
 
-    # 3. Final Fallback: Styled python-docx document
+    # 2. Secondary Attempt: Markdown with TeX math dollars
     try:
-        doc = Document()
-        doc.add_heading('SnapTex - Transcribed Notes', level=1)
-
-        for line in payload.latex.split('\n'):
-            line_str = line.strip()
-            if not line_str:
-                continue
-            if line_str.startswith('$$') or line_str.startswith('\\['):
-                # Add math block as centered callout paragraph
-                p = doc.add_paragraph()
-                p.alignment = 1  # Center alignment
-                run = p.add_run(line_str)
-                run.font.name = 'Cambria Math'
-            else:
-                doc.add_paragraph(line_str)
-
-        file_stream = io.BytesIO()
-        doc.save(file_stream)
-        file_stream.seek(0)
-
-        return Response(content=file_stream.getvalue(), media_type=DOCX_MIME)
+        output_bytes = pypandoc.convert_text(
+            cleaned_latex,
+            to='docx',
+            format='markdown+tex_math_dollars',
+            outputfile=None
+        )
+        return Response(content=output_bytes, media_type=DOCX_MIME)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"DOCX conversion error: {str(e)}")
