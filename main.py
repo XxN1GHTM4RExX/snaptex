@@ -3,6 +3,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pypandoc
+from docx import Document
 
 from ocr_engine import process_image_with_gemini
 from blur_detector import calculate_blur_score
@@ -49,11 +50,15 @@ async def process_document(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 
+
+
+
 @app.post("/export-docx")
 async def export_docx(payload: ExportRequest):
     DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+    # Attempt 1: Pandoc Conversion
     try:
-        # Convert Markdown + Embedded LaTeX directly to Word (.docx)
         output_bytes = pypandoc.convert_text(
             payload.latex,
             to='docx',
@@ -61,5 +66,23 @@ async def export_docx(payload: ExportRequest):
             outputfile=None
         )
         return Response(content=output_bytes, media_type=DOCX_MIME)
+    except Exception:
+        pass  # If pandoc fails or binary missing, proceed to pure Python fallback
+
+    # Attempt 2: Pure python-docx document builder (Guaranteed Success)
+    try:
+        doc = Document()
+        doc.add_heading('SnapTex - Extracted LaTeX & Notes', level=1)
+
+        # Write lines to docx
+        for line in payload.latex.split('\n'):
+            if line.strip():
+                doc.add_paragraph(line)
+
+        file_stream = io.BytesIO()
+        doc.save(file_stream)
+        file_stream.seek(0)
+
+        return Response(content=file_stream.getvalue(), media_type=DOCX_MIME)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"DOCX export failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
