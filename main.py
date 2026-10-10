@@ -54,7 +54,10 @@ async def process_document(file: UploadFile = File(...)):
 
 
 def latex_to_unicode_math(text: str) -> str:
-    """Replaces common LaTeX mathematical symbols with clean Unicode representation for Word export."""
+    """Replaces common LaTeX mathematical symbols with clean Unicode representation and strips raw LaTeX tags."""
+    # Strip \text{...} wrappers while preserving the inner plain text
+    cleaned = re.sub(r'\\text\{([^}]*)\}', r'\1', text)
+
     replacements = {
         r'\forall': '∀',
         r'\exists': '∃',
@@ -76,14 +79,12 @@ def latex_to_unicode_math(text: str) -> str:
         r'\mathbb{Z}': 'ℤ',
         r'\quad': '    ',
         r'\qquad': '        ',
-        r'\text{such that for all }': 'such that for all ',
         r'\max': 'max',
     }
-    cleaned = text
     for latex_pattern, unicode_char in replacements.items():
         cleaned = cleaned.replace(latex_pattern, unicode_char)
 
-    # Strip remaining math delimiters and raw inline bold tags
+    # Strip remaining math delimiters and raw inline markdown tags
     cleaned = cleaned.replace('$$', '').replace('$', '').replace('**', '')
     return cleaned
 
@@ -104,7 +105,7 @@ async def export_docx(payload: ExportRequest):
     except Exception:
         pass
 
-    # Attempt 2: Clean python-docx document builder without raw ### tags
+    # Attempt 2: Clean python-docx document builder
     try:
         doc = Document()
 
