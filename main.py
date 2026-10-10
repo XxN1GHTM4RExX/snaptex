@@ -1,5 +1,5 @@
 import io
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pypandoc
@@ -51,6 +51,7 @@ async def process_document(file: UploadFile = File(...)):
 
 @app.post("/export-docx")
 async def export_docx(payload: ExportRequest):
+    DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     try:
         # Convert LaTeX to DOCX using Pandoc
         output_bytes = pypandoc.convert_text(
@@ -59,13 +60,16 @@ async def export_docx(payload: ExportRequest):
             format='latex',
             outputfile=None
         )
-        return HTTPException(status_code=200, detail="Success")
-    except Exception as e:
-        # Fallback to plain text DOCX conversion if raw LaTeX fails pandoc parsing
-        output_bytes = pypandoc.convert_text(
-            payload.latex,
-            to='docx',
-            format='markdown',
-            outputfile=None
-        )
-        return output_bytes
+        return Response(content=output_bytes, media_type=DOCX_MIME)
+    except Exception:
+        try:
+            # Fallback to markdown format if raw LaTeX conversion encounters syntax issues
+            output_bytes = pypandoc.convert_text(
+                payload.latex,
+                to='docx',
+                format='markdown',
+                outputfile=None
+            )
+            return Response(content=output_bytes, media_type=DOCX_MIME)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"DOCX export failed: {str(e)}")

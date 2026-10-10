@@ -28,9 +28,9 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
             "Return ONLY the transcribed text and LaTeX code, without any introductory or conversational text."
         )
 
-        # Call Gemini 2.5 Flash
+        # Uses gemini-1.5-flash for stable free-tier quota & compatibility with new API keys
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-1.5-flash",
             contents=[image, prompt]
         )
 
@@ -38,8 +38,14 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
         return {"latex": extracted_text, "text": extracted_text}
 
     except Exception as e:
-        # Prevent 502 server crashes by returning errors inside the JSON response safely
+        error_msg = str(e)
+        if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+            return {
+                "latex": "Rate Limit Exceeded: You hit the free tier quota. Please wait a few minutes before trying again.",
+                "text": "Rate Limit Exceeded: You hit the free tier quota."
+            }
+
         return {
-            "latex": f"OCR Error: {str(e)}",
-            "text": f"OCR Error: {str(e)}"
+            "latex": f"OCR Processing Error: {error_msg}",
+            "text": f"OCR Processing Error: {error_msg}"
         }
