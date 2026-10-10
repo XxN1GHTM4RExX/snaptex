@@ -53,23 +53,13 @@ async def process_document(file: UploadFile = File(...)):
 async def export_docx(payload: ExportRequest):
     DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     try:
-        # Convert LaTeX to DOCX using Pandoc
+        # Convert Markdown + Embedded LaTeX directly to Word (.docx)
         output_bytes = pypandoc.convert_text(
             payload.latex,
             to='docx',
-            format='latex',
+            format='markdown',
             outputfile=None
         )
         return Response(content=output_bytes, media_type=DOCX_MIME)
-    except Exception:
-        try:
-            # Fallback to markdown format if raw LaTeX conversion encounters syntax issues
-            output_bytes = pypandoc.convert_text(
-                payload.latex,
-                to='docx',
-                format='markdown',
-                outputfile=None
-            )
-            return Response(content=output_bytes, media_type=DOCX_MIME)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"DOCX export failed: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DOCX export failed: {str(e)}")
