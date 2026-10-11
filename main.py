@@ -49,7 +49,7 @@ async def process_document(file: UploadFile = File(...)):
 
 
 def clean_markdown_and_latex(text: str) -> str:
-    """Strips Markdown bold syntax, converts basic LaTeX symbols to Unicode, and removes inline math delimiters ($)."""
+    """Formats carets, subscripts, and Greek powers into clean mathematical notation."""
     if not text:
         return ""
 
@@ -66,18 +66,31 @@ def clean_markdown_and_latex(text: str) -> str:
         r'\mathbb{N}': 'ℕ',
         r'\mathbb{R}': 'ℝ',
         r'\Longrightarrow': '⟹',
-        r'\Longrightarrow': '⟹',
         r'\implies': '⟹',
         r'\wedge': '∧',
         r'\vee': '∨',
         r'\geq': '≥',
-        r'\geq ': '≥ ',
         r'\leq': '≤',
         r'\dots': '…',
     }
 
     for pattern, replacement in replacements.items():
         cleaned = cleaned.replace(pattern, replacement)
+
+    # Format common subscript indices
+    subscripts = {'0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄', '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉',
+                  'i': 'ᵢ', 'j': 'ⱼ', 'n': 'ₙ', 'k': 'ₖ'}
+    for digit, sub in subscripts.items():
+        cleaned = cleaned.replace(f'_{digit}', sub)
+
+    # Format common numeric superscripts
+    superscripts = {'0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
+                    'n': 'ⁿ', '+': '⁺', '-': '⁻'}
+    for char, sup in superscripts.items():
+        cleaned = cleaned.replace(f'^{char}', sup)
+
+    # Remove lingering carets around parenthesized expressions like ^(α) -> ⁽α⁾
+    cleaned = re.sub(r'\^\(([^)]+)\)', r'⁽\1⁾', cleaned)
 
     # Strip bold markdown (**), math delimiters ($), and excess braces
     cleaned = cleaned.replace('**', '').replace('$', '')
@@ -102,7 +115,7 @@ async def export_docx(payload: ExportRequest):
     except Exception:
         pass
 
-    # Attempt 2: Clean python-docx formatter (Guaranteed readable Word export)
+    # Attempt 2: Clean python-docx formatter
     try:
         doc = Document()
 
