@@ -27,6 +27,7 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
         }
 
     image = Image.open(io.BytesIO(image_bytes))
+
     prompt = (
         "Transcribe all handwritten text and mathematical formulas in this image accurately. "
         "Convert all math expressions into standard LaTeX syntax using $...$ for inline math "
@@ -35,10 +36,11 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
         "Return ONLY the transcribed text and LaTeX code, without any introductory or conversational text."
     )
 
+    # Active Gemini 3.x Flash models in order of priority
     models_to_try = [
-        "gemini-3.8-flash",  # Primary choice
-        "gemini-2.5-flash",  # High-accuracy fallback
-        "gemini-2.0-flash"  # High-availability fallback
+        "gemini-3.8-flash",  # Primary flagship
+        "gemini-3.6-flash",  # Active stable fallback
+        "gemini-3.5-flash-lite"  # High-availability lightweight fallback
     ]
 
     last_error = "Unknown error"
@@ -57,6 +59,7 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
                 last_error = str(e)
                 error_msg = last_error.lower()
 
+                # Check for rate limit, capacity, or demand errors
                 rate_limit_keywords = ["429", "503", "rate limit", "quota", "unavailable", "resource_exhausted",
                                        "exceeded", "high demand"]
 
@@ -64,9 +67,13 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
                     time.sleep(0.5)
                     continue
 
+                # If a model endpoint is retired or invalid (404), break loop to try the next model immediately
+                if "404" in error_msg or "not_found" in error_msg:
+                    break
+
                 return {"latex": f"OCR Processing Error: {last_error}", "text": f"OCR Processing Error: {last_error}"}
 
     return {
-        "latex": f"Error: All API keys and model fallbacks were attempted. Last response: {last_error}",
+        "latex": f"Error: All API keys and valid model endpoints were attempted. Last response: {last_error}",
         "text": "Error: All keys and models busy."
     }
