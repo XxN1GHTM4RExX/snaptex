@@ -27,16 +27,12 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
         }
 
     image = Image.open(io.BytesIO(image_bytes))
-
-    # Clean Unicode math instructions to eliminate raw backslash leakage
     prompt = (
-        "Transcribe all handwritten/printed text and mathematical formulas in this image accurately. "
-        "IMPORTANT FOR MATH FORMATTING: "
-        "Do not use raw LaTeX backslash commands like \\alpha, \\prod, \\times, \\implies, \\in, \\wedge, \\vee, \\le, \\ge, \\mathbb{N}, \\mathbb{Z}. "
-        "Instead, output standard Unicode math characters directly in the text "
-        "(e.g., use α, ∏, ×, ⟹, ∈, ∧, ∨, ≤, ≥, ℕ, ℤ, ℝ, ∀, ∃, …, ₁, ₂, ᵢ, ₙ, ³, ⁴). "
-        "Keep display equations centered or on their own lines. "
-        "Return ONLY the transcribed text and formulas, without any conversational filler."
+        "Transcribe all handwritten text and mathematical formulas in this image accurately. "
+        "Convert all math expressions into standard LaTeX syntax using $...$ for inline math "
+        "and $$...$$ for display math. Do not wrap normal prose inside \\text{} blocks. "
+        "Do not use markdown italics like *a* or *b* inside math or prose. "
+        "Return ONLY the transcribed text and LaTeX code, without any introductory or conversational text."
     )
 
     models_to_try = [
