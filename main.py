@@ -54,11 +54,16 @@ async def process_document(file: UploadFile = File(...)):
 
 
 def latex_to_unicode_math(text: str) -> str:
-    """Replaces common LaTeX mathematical symbols with clean Unicode representation and strips raw LaTeX tags."""
-    # Strip \text{...} wrappers while preserving the inner plain text
+    """Replaces LaTeX symbols and commands with clean Unicode representations for Word export."""
+    # Strip \text{...} wrappers while preserving inner text
     cleaned = re.sub(r'\\text\{([^}]*)\}', r'\1', text)
 
     replacements = {
+        # Logic & Relations
+        r'\Longrightarrow': '⟹',
+        r'\longrightarrow': '⟶',
+        r'\rightarrow': '→',
+        r'\iff': '⇔',
         r'\forall': '∀',
         r'\exists': '∃',
         r'\in': '∈',
@@ -68,24 +73,42 @@ def latex_to_unicode_math(text: str) -> str:
         r'\le': '≤',
         r'\ge': '≥',
         r'\neq': '≠',
-        r'\iff': '⇔',
-        r'\implies': '⇒',
-        r'\rightarrow': '→',
-        r'\longrightarrow': '⟶',
+        r'\wedge': '∧',
+        r'\vee': '∨',
+
+        # Dots & Spacing
+        r'\dots': '…',
+        r'\ldots': '…',
+        r'\cdots': '⋯',
+        r'\quad': '    ',
+        r'\qquad': '        ',
+        r'\hfill': ' ',
+
+        # Operators & Sets
+        r'\prod': '∏',
+        r'\sum': '∑',
         r'\times': '×',
         r'\mathbb{R}^+': 'ℝ⁺',
         r'\mathbb{R}': 'ℝ',
         r'\mathbb{N}': 'ℕ',
         r'\mathbb{Z}': 'ℤ',
-        r'\quad': '    ',
-        r'\qquad': '        ',
         r'\max': 'max',
+
+        # Greek Letters
+        r'\alpha': 'α',
+        r'\beta': 'β',
+        r'\delta': 'δ',
+        r'\pi': 'π',
     }
+
     for latex_pattern, unicode_char in replacements.items():
         cleaned = cleaned.replace(latex_pattern, unicode_char)
 
-    # Strip remaining math delimiters and raw inline markdown tags
+    # Clean up remaining LaTeX delimiters and syntax artifacts
+    cleaned = re.sub(r'\\\{', '{', cleaned)
+    cleaned = re.sub(r'\\\}', '}', cleaned)
     cleaned = cleaned.replace('$$', '').replace('$', '').replace('**', '')
+
     return cleaned
 
 
