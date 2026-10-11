@@ -5,7 +5,7 @@ import io
 # Set Page Config
 st.set_page_config(page_title="SnapTex - OCR Note Processing", page_icon="📝", layout="centered")
 
-API_BASE_URL = "https://your-render-app-url.onrender.com"  # Replace with your actual Render URL
+API_BASE_URL = "https://snaptex.onrender.com"  # Replace with your actual Render URL
 
 st.title("SnapTex 📝")
 st.caption("Convert handwritten notes and mathematical formulas into formatted text and LaTeX.")
