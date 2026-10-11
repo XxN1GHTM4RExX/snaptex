@@ -40,7 +40,7 @@ async def process_document(file: UploadFile = File(...)):
         # Calculate image blur score
         blur_score = calculate_blur_score(contents)
 
-        # Extract LaTeX text using Gemini
+        # Extract LaTeX text using Gemini (uses multi-key rotation engine)
         ocr_result = process_image_with_gemini(contents)
 
         return {
