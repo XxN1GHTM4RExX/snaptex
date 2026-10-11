@@ -27,14 +27,18 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
         }
 
     image = Image.open(io.BytesIO(image_bytes))
+
+    # Clean Unicode math instructions to eliminate raw backslash leakage
     prompt = (
-        "Transcribe all handwritten text and mathematical formulas in this image accurately. "
-        "Convert all math expressions into standard LaTeX syntax using $...$ for inline math "
-        "and $$...$$ for display math. Do not wrap normal prose inside \\text{} blocks. "
-        "Return ONLY the transcribed text and LaTeX code, without any introductory or conversational text."
+        "Transcribe all handwritten/printed text and mathematical formulas in this image accurately. "
+        "IMPORTANT FOR MATH FORMATTING: "
+        "Do not use raw LaTeX backslash commands like \\alpha, \\prod, \\times, \\implies, \\in, \\wedge, \\vee, \\le, \\ge, \\mathbb{N}, \\mathbb{Z}. "
+        "Instead, output standard Unicode math characters directly in the text "
+        "(e.g., use α, ∏, ×, ⟹, ∈, ∧, ∨, ≤, ≥, ℕ, ℤ, ℝ, ∀, ∃, …, ₁, ₂, ᵢ, ₙ, ³, ⁴). "
+        "Keep display equations centered or on their own lines. "
+        "Return ONLY the transcribed text and formulas, without any conversational filler."
     )
 
-    # Sequence of models to try (if primary cluster is overloaded, fallback instantly)
     models_to_try = [
         "gemini-3.8-flash",  # Primary choice
         "gemini-2.5-flash",  # High-accuracy fallback
@@ -43,7 +47,6 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
 
     last_error = "Unknown error"
 
-    # Multi-model and multi-key rotation loop
     for model_name in models_to_try:
         for key in api_keys:
             try:
@@ -62,8 +65,8 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
                                        "exceeded", "high demand"]
 
                 if any(keyword in error_msg for keyword in rate_limit_keywords):
-                    time.sleep(0.5)  # Brief delay to permit server congestion clearing
-                    continue  # Move to next key or model
+                    time.sleep(0.5)
+                    continue
 
                 return {"latex": f"OCR Processing Error: {last_error}", "text": f"OCR Processing Error: {last_error}"}
 
