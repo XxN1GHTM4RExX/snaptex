@@ -21,15 +21,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 class ExportRequest(BaseModel):
     latex: str
-
 
 @app.get("/")
 def read_root():
     return {"message": "SnapTex API is online and healthy!"}
-
 
 @app.post("/process-document")
 async def process_document(file: UploadFile = File(...)):
@@ -47,53 +44,60 @@ async def process_document(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
-
 def clean_fallback_text(text: str) -> str:
-    """Strips Markdown asterisks, carets, and converts basic LaTeX to clean text for fallback export."""
+    """Thoroughly converts raw LaTeX backslashes, braces, superscripts, and subscripts into readable text."""
     if not text:
         return ""
 
-    # Remove \text{...} wrappers
-    cleaned = re.sub(r'\\text\{([^}]*)\}', r'\1', text)
+    cleaned = text
 
-    # Basic LaTeX symbol replacements
+    # Strip \text{...}, \mathrm{...}, \mathbf{...}
+    cleaned = re.sub(r'\\(?:text|mathrm|mathbf)\{([^}]*)\}', r'\1', cleaned)
+
+    # Convert LaTeX relations and operators
     replacements = {
+        r'\Longrightarrow': '⟹', r'\Longleftrightarrow': '⟺', r'\implies': '⟹', r'\iff': '⇔',
         r'\forall': '∀', r'\exists': '∃', r'\in': '∈', r'\notin': '∉',
-        r'\mathbb{Z}': 'ℤ', r'\mathbb{N}': 'ℕ', r'\mathbb{R}': 'ℝ',
-        r'\Longrightarrow': '⟹', r'\implies': '⟹', r'\wedge': '∧',
-        r'\vee': '∨', r'\geq': '≥', r'\leq': '≤', r'\dots': '…',
-        r'\prod': '∏', r'\sum': '∑', r'\times': '×',
-        r'\alpha': 'α', r'\beta': 'β', r'\delta': 'δ', r'\gamma': 'γ'
+        r'\mathbb{Z}': 'ℤ', r'\mathbb{N}': 'ℕ', r'\mathbb{R}': 'ℝ', r'\mathbb{Q}': 'ℚ',
+        r'\wedge': '∧', r'\vee': '∨', r'\leq': '≤', r'\le': '≤', r'\geq': '≥', r'\ge': '≥',
+        r'\neq': '≠', r'\approx': '≈', r'\times': '×', r'\div': '÷', r'\pm': '±',
+        r'\dots': '…', r'\ldots': '…', r'\cdots': '⋯', r'\prod': '∏', r'\sum': '∑', r'\int': '∫',
+        r'\alpha': 'α', r'\beta': 'β', r'\gamma': 'γ', r'\delta': 'δ', r'\epsilon': 'ε',
+        r'\theta': 'θ', r'\lambda': 'λ', r'\pi': 'π', r'\sigma': 'σ', r'\omega': 'ω',
+        r'\quad': ' ', r'\qquad': ' '
     }
 
     for pattern, replacement in replacements.items():
         cleaned = cleaned.replace(pattern, replacement)
 
-    # Convert subscript patterns (_1 -> ₁, _i -> ᵢ)
-    subscripts = {'0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄', '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉',
-                  'i': 'ᵢ', 'j': 'ⱼ', 'n': 'ₙ', 'k': 'ₖ'}
-    for digit, sub in subscripts.items():
-        cleaned = cleaned.replace(f'_{digit}', sub)
+    # Convert subscripts: _{1} or _1 -> ₁
+    subscripts = {'0':'₀', '1':'₁', '2':'₂', '3':'₃', '4':'₄', '5':'₅', '6':'₆', '7':'₇', '8':'₈', '9':'₉', 'i':'ᵢ', 'j':'ⱼ', 'n':'ₙ', 'k':'ₖ'}
+    for char, sub in subscripts.items():
+        cleaned = cleaned.replace(f'_{{{char}}}', sub)
+        cleaned = cleaned.replace(f'_{char}', sub)
 
-    # Convert superscript patterns (^1 -> ¹, ^2 -> ²)
-    superscripts = {'0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
-                    'n': 'ⁿ'}
+    # Convert superscripts: ^{1} or ^1 -> ¹
+    superscripts = {'0':'⁰', '1':'¹', '2':'²', '3':'³', '4':'⁴', '5':'⁵', '6':'⁶', '7':'⁷', '8':'⁸', '9':'⁹', 'n':'ⁿ', '+':'⁺', '-':'⁻'}
     for char, sup in superscripts.items():
+        cleaned = cleaned.replace(f'^{{{char}}}', sup)
         cleaned = cleaned.replace(f'^{char}', sup)
 
-    # Strip markdown artifacts (*, **, $, caret parentheses)
+    # Convert lingering superscript brackets like ^{α₁} -> ⁽α₁⁾
+    cleaned = re.sub(r'\^\{([^}]*)\}', r'⁽\1⁾', cleaned)
+    cleaned = re.sub(r'_\{([^}]*)\}', r'₍\1₎', cleaned)
+
+    # Strip Markdown and LaTeX delimiters (*, **, $, {}, \)
     cleaned = cleaned.replace('**', '').replace('*', '').replace('$', '')
-    cleaned = re.sub(r'\^\(([^)]+)\)', r'⁽\1⁾', cleaned)
     cleaned = re.sub(r'\\([{}])', r'\1', cleaned)
+    cleaned = cleaned.replace('{', '').replace('}', '').replace('\\', '')
 
     return cleaned.strip()
-
 
 @app.post("/export-docx")
 async def export_docx(payload: ExportRequest):
     DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
-    # Attempt 1: Pandoc conversion (Generates native Word equations)
+    # Attempt 1: Pandoc conversion (creates real Word math equations)
     try:
         output_bytes = pypandoc.convert_text(
             payload.latex,
@@ -105,7 +109,7 @@ async def export_docx(payload: ExportRequest):
     except Exception as e:
         print(f"Pandoc fallback notice: {str(e)}")
 
-    # Attempt 2: Clean python-docx fallback (Strips all markdown/caret noise)
+    # Attempt 2: Comprehensive python-docx fallback
     try:
         doc = Document()
 
@@ -129,9 +133,7 @@ async def export_docx(payload: ExportRequest):
                 continue
 
             # Headings
-            if stripped.startswith('##') or stripped.startswith('Théorème') or stripped.startswith(
-                    'Définition') or stripped.startswith('Proposition') or stripped.startswith(
-                    'Exercice') or stripped.startswith('Corollaire'):
+            if stripped.startswith('##') or stripped.startswith('Théorème') or stripped.startswith('Définition') or stripped.startswith('Proposition') or stripped.startswith('Exercice') or stripped.startswith('Corollaire'):
                 clean_text = clean_fallback_text(stripped)
                 p = doc.add_paragraph()
                 run = p.add_run(clean_text)
