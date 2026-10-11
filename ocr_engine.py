@@ -33,7 +33,9 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
         "Return ONLY the transcribed text and LaTeX code, without any introductory or conversational text."
     )
 
-    # Failover loop: Try each API key in order
+    last_error = "Unknown error"
+
+    # Failover loop: Try each API key
     for key in api_keys:
         try:
             client = genai.Client(api_key=key)
@@ -44,17 +46,18 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
             extracted_text = response.text.strip() if (response and response.text) else "No text detected."
             return {"latex": extracted_text, "text": extracted_text}
         except Exception as e:
-            error_msg = str(e).lower()
+            last_error = str(e)
+            error_msg = last_error.lower()
 
-            # Catch rate limit phrases (case-insensitive)
             rate_limit_keywords = ["429", "503", "rate limit", "quota", "unavailable", "resource_exhausted", "exceeded"]
 
             if any(keyword in error_msg for keyword in rate_limit_keywords):
-                continue  # Jump seamlessly to GEMINI_API_KEY_2, 3, etc.
+                continue  # Try next key
 
-            return {"latex": f"OCR Processing Error: {str(e)}", "text": f"OCR Processing Error: {str(e)}"}
+            return {"latex": f"OCR Processing Error: {last_error}", "text": f"OCR Processing Error: {last_error}"}
 
+    # Fallback return so the function NEVER returns None
     return {
-        "latex": "Error: All available API keys are currently rate-limited or busy. Please wait 15 seconds.",
-        "text": "Error: All API keys busy."
+        "latex": f"Error: All available API keys were tried. Last response: {last_error}",
+        "text": f"Error: All API keys exhausted."
     }
