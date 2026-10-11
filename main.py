@@ -11,12 +11,6 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from ocr_engine import process_image_with_gemini
 from blur_detector import calculate_blur_score
 
-# Ensure Pandoc binary is available in the environment
-try:
-    pypandoc.get_pandoc_version()
-except OSError:
-    pypandoc.download_pandoc()
-
 app = FastAPI(title="SnapTex API", version="1.0")
 
 # Enable CORS for Streamlit frontend requests
@@ -63,8 +57,14 @@ async def process_document(file: UploadFile = File(...)):
 async def export_docx(payload: ExportRequest):
     DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
-    # Attempt 1: Native Pandoc conversion (creates real Word math equations)
+    # Attempt 1: Native Pandoc conversion
     try:
+        # Check/download Pandoc dynamically inside request handler to prevent boot blocks
+        try:
+            pypandoc.get_pandoc_version()
+        except OSError:
+            pypandoc.download_pandoc()
+
         output_bytes = pypandoc.convert_text(
             payload.latex,
             to='docx',
@@ -73,10 +73,9 @@ async def export_docx(payload: ExportRequest):
         )
         return Response(content=output_bytes, media_type=DOCX_MIME)
     except Exception as e:
-        # Log error details if Pandoc conversion encounters an issue
-        print(f"Pandoc export error: {str(e)}")
+        print(f"Pandoc export notice: {str(e)}")
 
-    # Attempt 2: Basic python-docx fallback
+    # Attempt 2: Clean python-docx fallback
     try:
         doc = Document()
 
@@ -93,7 +92,6 @@ async def export_docx(payload: ExportRequest):
 
         doc.add_paragraph()
 
-        # Simple line-by-line paragraph rendering without symbol dictionaries
         lines = payload.latex.split('\n')
         for line in lines:
             stripped = line.strip()
