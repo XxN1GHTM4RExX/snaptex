@@ -15,6 +15,14 @@ st.set_page_config(
 # Ensure this matches your live Render API URL without a trailing slash!
 API_BASE_URL = "https://snaptex.onrender.com"
 
+#waking up render backend prior to doc processing
+@st.cache_data(ttl=300)
+def wakeup_backend():
+    try:
+        requests.get(f"{API_BASE_URL}/",timeout=5)
+    except Exception:
+        pass
+wakeup_backend()
 st.title("📄 SnapTex")
 st.subheader("Convert handwritten notes & math formulas into editable LaTeX & Word docs")
 
@@ -59,7 +67,7 @@ if uploaded_file is not None:
                 files = {"file": ("document.jpg", compressed_bytes, "image/jpeg")}
 
                 # 2. Call backend OCR endpoint (60s timeout to allow Render wake-ups)
-                response = requests.post(f"{API_BASE_URL}/process-document", files=files, timeout=60)
+                response = requests.post(f"{API_BASE_URL}/process-document", files=files, timeout=120)
 
                 if response.status_code != 200:
                     st.error(f"Backend Server Error ({response.status_code}):")
