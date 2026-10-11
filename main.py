@@ -54,62 +54,113 @@ async def process_document(file: UploadFile = File(...)):
 
 
 def latex_to_unicode_math(text: str) -> str:
-    """Replaces LaTeX symbols and commands with clean Unicode representations for Word export."""
-    # Strip \text{...} wrappers while preserving inner text
-    cleaned = re.sub(r'\\text\{([^}]*)\}', r'\1', text)
+    """Replaces LaTeX symbols, operators, and formatting tags with clean Unicode text."""
+    if not text:
+        return ""
 
+    # 1. Strip \text{...}, \mathrm{...}, and \mathbf{...} wrappers
+    cleaned = re.sub(r'\\(?:text|mathrm|mathbf)\{([^}]*)\}', r'\1', text)
+
+    # 2. Comprehensive symbol mapping (handles both lowercase and capitalized variants)
     replacements = {
-        # Logic & Relations
+        # Implication & Arrows
         r'\Longrightarrow': '⟹',
+        r'\Longleftrightarrow': '⟺',
+        r'\implies': '⟹',
+        r'\Implies': '⟹',
+        r'\iff': '⇔',
         r'\longrightarrow': '⟶',
         r'\rightarrow': '→',
-        r'\iff': '⇔',
+        r'\to': '→',
+
+        # Quantifiers & Set Theory
         r'\forall': '∀',
         r'\exists': '∃',
         r'\in': '∈',
         r'\notin': '∉',
         r'\subset': '⊂',
         r'\subseteq': '⊆',
+        r'\cap': '∩',
+        r'\cup': '∪',
+
+        # Operations & Relations
         r'\le': '≤',
+        r'\leq': '≤',
         r'\ge': '≥',
+        r'\geq': '≥',
         r'\neq': '≠',
+        r'\approx': '≈',
         r'\wedge': '∧',
         r'\vee': '∨',
+        r'\times': '×',
+        r'\div': '÷',
+        r'\pm': '±',
 
         # Dots & Spacing
         r'\dots': '…',
         r'\ldots': '…',
         r'\cdots': '⋯',
-        r'\quad': '    ',
-        r'\qquad': '        ',
+        r'\quad': ' ',
+        r'\qquad': ' ',
         r'\hfill': ' ',
 
-        # Operators & Sets
+        # Product, Sum & Calculus Operators
         r'\prod': '∏',
         r'\sum': '∑',
-        r'\times': '×',
+        r'\int': '∫',
+
+        # Blackboard Bold Sets
         r'\mathbb{R}^+': 'ℝ⁺',
         r'\mathbb{R}': 'ℝ',
         r'\mathbb{N}': 'ℕ',
         r'\mathbb{Z}': 'ℤ',
+        r'\mathbb{Q}': 'ℚ',
+        r'\mathbb{C}': 'ℂ',
+
+        # Common Functions
         r'\max': 'max',
+        r'\min': 'min',
+        r'\lim': 'lim',
+        r'\log': 'log',
+        r'\ln': 'ln',
 
         # Greek Letters
         r'\alpha': 'α',
         r'\beta': 'β',
+        r'\gamma': 'γ',
         r'\delta': 'δ',
+        r'\epsilon': 'ε',
+        r'\theta': 'θ',
+        r'\lambda': 'λ',
         r'\pi': 'π',
+        r'\sigma': 'σ',
+        r'\omega': 'ω',
+        r'\Delta': 'Δ',
     }
 
+    # Apply symbol replacements
     for latex_pattern, unicode_char in replacements.items():
         cleaned = cleaned.replace(latex_pattern, unicode_char)
 
-    # Clean up remaining LaTeX delimiters and syntax artifacts
-    cleaned = re.sub(r'\\\{', '{', cleaned)
-    cleaned = re.sub(r'\\\}', '}', cleaned)
-    cleaned = cleaned.replace('$$', '').replace('$', '').replace('**', '')
+    # 3. Clean up LaTeX formatting syntax (braces, powers, subscripts)
+    cleaned = re.sub(r'_\{([^}]*)\}', r'_\1', cleaned)
+    cleaned = re.sub(r'\^\{([^}]*)\}', r'^\1', cleaned)
 
-    return cleaned
+    # Convert common digit/letter subscripts
+    subscripts = {'0':'₀', '1':'₁', '2':'₂', '3':'₃', '4':'₄', '5':'₅', '6':'₆', '7':'₇', '8':'₈', '9':'₉', 'i':'ᵢ', 'j':'ⱼ', 'n':'ₙ', 'k':'ₖ'}
+    for digit, sub in subscripts.items():
+        cleaned = cleaned.replace(f'_{digit}', sub)
+
+    # Convert common superscripts
+    superscripts = {'0':'⁰', '1':'¹', '2':'²', '3':'³', '4':'⁴', '5':'⁵', '6':'⁶', '7':'⁷', '8':'⁸', '9':'⁹', 'n':'ⁿ', '+':'⁺', '-':'⁻'}
+    for char, sup in superscripts.items():
+        cleaned = cleaned.replace(f'^{char}', sup)
+
+    # Clean up remaining LaTeX slash artifacts and math delimiters
+    cleaned = re.sub(r'\\([{}_\^\#\&])', r'\1', cleaned)
+    cleaned = cleaned.replace('$$', '').replace('$', '').replace('**', '').replace('\\', '')
+
+    return cleaned.strip()
 
 
 @app.post("/export-docx")
