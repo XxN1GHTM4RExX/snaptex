@@ -146,11 +146,13 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
         "   a. PRINTED ILLUSTRATIONS / SCHEMATICS / PHOTOS:\n"
         "      Return exact bounding boxes using: [CROP_DIAGRAM: ymin, xmin, ymax, xmax].\n"
         "   b. HAND-DRAWN SKETCHES / GRAPHS / CURVES:\n"
-        "      Do NOT crop hand-drawn graphs or distribution curves. "
-        "      ALWAYS output a self-contained Python script using `matplotlib`, `numpy`, and `scipy.stats` "
-        "      that recreates a publication-grade vector version of the graph on a pure white (#FFFFFF) background. "
-        "      Include proper labels, axis ticks, shaded regions under curves, and annotations matching the drawing. "
-        "      Wrap the script inside ```python ... ``` block tags directly where the figure belongs in the document flow."
+        "      ALWAYS output a self-contained Python script using `matplotlib.pyplot`, `numpy`, and `scipy.stats` "
+        "      that recreates a clean vector version of the chart/diagram on a pure white (#FFFFFF) background.\n"
+        "      CRITICAL SCRIPT RULES:\n"
+        "      - Write purely linear procedural code. Do NOT define custom recursive functions or custom classes.\n"
+        "      - For distribution curves, use `scipy.stats.norm.pdf()` and `plt.fill_between()` for shaded regions.\n"
+        "      - Do NOT attempt to render equations inside the plot; keep text annotations simple using `plt.text()` or `plt.annotate()`.\n"
+        "      - Wrap the script inside ```python ... ``` block tags directly where the figure belongs in the document flow."
     )
 
     client = genai.Client()
