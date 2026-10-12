@@ -14,13 +14,14 @@ st.title("SnapTex - Mathematical OCR & Export")
 uploaded_file = st.file_uploader("Upload an image containing mathematical notes...", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
-    st.image(uploaded_file, caption="Uploaded Document", use_container_width=True)
+    # Updated width='stretch' to replace removed use_container_width
+    st.image(uploaded_file, caption="Uploaded Document", width="stretch")
 
     if st.button("Process Document", type="primary"):
         with st.spinner("Processing OCR via Gemini Engine..."):
             try:
                 files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
-                response = requests.post(f"{BACKEND_URL}/process-document", files=files)
+                response = requests.post(f"{BACKEND_URL}/process-document", files=files, timeout=60)
 
                 if response.status_code == 200:
                     data = response.json()
