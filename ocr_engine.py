@@ -11,10 +11,49 @@ matplotlib.use('Agg')  # Non-interactive backend for headless Render server
 import matplotlib.pyplot as plt
 from PIL import Image
 from google import genai
+from google.genai.errors import APIError
+
+# Model pool ordered by rate-limit availability and reliability
+MODEL_POOL = [
+    "gemini-2.5-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-8b",
+    "gemini-2.0-flash",
+    "gemini-2.5-flash-lite",
+]
+
+
+def generate_with_model_fallback(client: genai.Client, contents: list) -> str:
+    """Tries the primary model first, rotating through fallbacks if rate limits (429)
+
+    or API errors occur.
+    """
+    last_exception = None
+
+    for model_name in MODEL_POOL:
+        try:
+            print(f"Attempting OCR with model: {model_name}")
+            response = client.models.generate_content(
+                model=model_name,
+                contents=contents
+            )
+            if response.text:
+                return response.text
+        except APIError as e:
+            print(f"Model {model_name} failed with API error: {e}. Rotating to next model...")
+            last_exception = e
+            continue
+        except Exception as e:
+            print(f"Unexpected error on {model_name}: {e}. Rotating to next model...")
+            last_exception = e
+            continue
+
+    raise Exception(f"All models in fallback pool failed. Last error: {str(last_exception)}")
 
 
 def crop_and_clean_diagram(image: Image.Image, coords: list) -> str:
     """Crops printed schematics/photos, removes page shadow gradients,
+
     boosts contrast, and returns base64 PNG string.
     """
     width, height = image.size
@@ -61,6 +100,7 @@ def crop_and_clean_diagram(image: Image.Image, coords: list) -> str:
 
 def render_matplotlib_code(code_str: str) -> str:
     """Safely executes generated Matplotlib code for hand-drawn sketches
+
     and returns a base64 PNG image on a pure #FFFFFF background.
     """
     buffer = io.BytesIO()
@@ -113,12 +153,7 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
     )
 
     client = genai.Client()
-    response = client.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=[image, prompt]
-    )
-
-    raw_text = response.text or ""
+    raw_text = generate_with_model_fallback(client, [image, prompt])
     cleaned_latex = raw_text
 
     # 1. Process Path A: Crop printed schematics [CROP_DIAGRAM: ymin, xmin, ymax, xmax]
