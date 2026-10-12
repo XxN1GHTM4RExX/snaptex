@@ -25,7 +25,6 @@ MODEL_POOL = [
 
 def generate_with_model_fallback(client: genai.Client, contents: list) -> str:
     """Tries the primary model first, rotating through fallbacks if rate limits (429)
-
     or API errors occur.
     """
     last_exception = None
@@ -53,7 +52,6 @@ def generate_with_model_fallback(client: genai.Client, contents: list) -> str:
 
 def crop_and_clean_diagram(image: Image.Image, coords: list) -> str:
     """Crops printed schematics/photos, removes page shadow gradients,
-
     boosts contrast, and returns base64 PNG string.
     """
     width, height = image.size
@@ -87,7 +85,6 @@ def crop_and_clean_diagram(image: Image.Image, coords: list) -> str:
 
 def sanitize_code(code_str: str) -> str:
     """Strips function definitions and unsafe constructs using AST parsing
-
     to prevent recursive execution loops.
     """
     cleaned = code_str.replace("```python", "").replace("```", "").strip()
@@ -107,7 +104,6 @@ def sanitize_code(code_str: str) -> str:
 
 def render_matplotlib_code(code_str: str) -> str:
     """Executes Matplotlib code cleanly in an isolated scope.
-
     Returns base64 string on success, or None on error to trigger crop fallback.
     """
     buffer = io.BytesIO()
@@ -154,7 +150,7 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
         "      - Write ONLY linear, procedural Matplotlib code for THAT SINGLE figure (fig, ax = plt.subplots(figsize=(6, 3))).\n"
         "      - Do NOT combine multiple separate drawings into one giant script.\n"
         "      - Write purely sequential code (plt.plot, plt.fill_between, plt.xticks, plt.text). Absolutely NO custom `def` functions, recursion, or loops.\n"
-        "      - Transcribe all x-axis values and region numbers (e.g. 34%, 13.5%, 2.35%, x-values) into `plt.xticks()` or `plt.text()`.\n"
+        "      - Transcribe all x-axis values and region numbers (e.g., 34%, 13.5%, 2.35%, x-values) into `plt.xticks()` or `plt.text()`.\n"
         "      - Always include bounding box coordinates in a comment at the top like `# BOUNDS: ymin, xmin, ymax, xmax` for fallback.\n"
         "      - Wrap each script inside its own ```python ... ``` block tag directly where that specific figure belongs in the text flow."
     )
