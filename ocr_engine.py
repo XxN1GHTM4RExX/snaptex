@@ -1,79 +1,83 @@
-import os
 import io
-import time
-from PIL import Image
+import re
+import base64
+from PIL import Image, ImageEnhance, ImageOps
 from google import genai
 
 
-def get_gemini_keys():
-    """Gathers all available Gemini API keys from environment variables."""
-    keys = []
-    primary = os.getenv("GEMINI_API_KEY")
-    if primary:
-        keys.append(primary)
-    for i in range(2, 8):
-        k = os.getenv(f"GEMINI_API_KEY_{i}")
-        if k:
-            keys.append(k)
-    return keys
+def crop_and_clean_diagram(image: Image.Image, coords: list) -> str:
+    """Crops a diagram region based on [ymin, xmin, ymax, xmax] (0-1000 scale),
+
+    cleans contrast, and returns base64 string.
+    """
+    width, height = image.size
+    ymin, xmin, ymax, xmax = coords
+
+    # 1. Convert normalized 0-1000 scale to actual pixel coordinates
+    left = int((xmin / 1000.0) * width)
+    top = int((ymin / 1000.0) * height)
+    right = int((xmax / 1000.0) * width)
+    bottom = int((ymax / 1000.0) * height)
+
+    # 2. Add 5% safety margin padding
+    pad_w = int((right - left) * 0.05)
+    pad_h = int((bottom - top) * 0.05)
+
+    left = max(0, left - pad_w)
+    top = max(0, top - pad_h)
+    right = min(width, right + pad_w)
+    bottom = min(height, bottom + pad_h)
+
+    # 3. Crop
+    cropped = image.crop((left, top, right, bottom))
+
+    # 4. Clean image: boost contrast slightly
+    enhancer = ImageEnhance.Contrast(cropped)
+    cleaned = enhancer.enhance(1.5)
+
+    # 5. Convert to Base64 PNG string
+    buffer = io.BytesIO()
+    cleaned.save(buffer, format="PNG")
+    img_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
+    return f"data:image/png;base64,{img_str}"
 
 
 def process_image_with_gemini(image_bytes: bytes) -> dict:
-    api_keys = get_gemini_keys()
-    if not api_keys:
-        return {
-            "latex": "Error: GEMINI_API_KEY missing in Render environment variables.",
-            "text": "Error: GEMINI_API_KEY missing."
-        }
-
     image = Image.open(io.BytesIO(image_bytes))
 
     prompt = (
-        "Transcribe all handwritten text and mathematical formulas in this image accurately. "
-        "Convert all math expressions into standard LaTeX syntax using $...$ for inline math "
-        "and $$...$$ for display math. Do not wrap normal prose inside \\text{} blocks. "
-        "Do not use markdown italics like *a* or *b* inside math or prose. "
-        "Return ONLY the transcribed text and LaTeX code, without any introductory or conversational text."
+        "Transcribe all handwritten text and mathematical formulas in this image accurately into LaTeX. "
+        "Use $...$ for inline math and $$...$$ for display math. "
+        "If there are any diagrams, graphs, geometric figures, or drawings in this image, "
+        "identify their bounding boxes in normalized 0-1000 coordinates using exact tags like: "
+        "[DIAGRAM: ymin, xmin, ymax, xmax] "
+        "Place the [DIAGRAM: ...] tag in the text exactly where the figure appears."
     )
 
-    # Active Gemini 3.x Flash models in order of priority
-    models_to_try = [
-        "gemini-3.8-flash",  # Primary flagship
-        "gemini-3.6-flash",  # Active stable fallback
-        "gemini-3.5-flash-lite"  # High-availability lightweight fallback
-    ]
+    client = genai.Client()  # Uses GEMINI_API_KEY from environment
+    response = client.models.generate_content(
+        model="gemini-3.8-flash",
+        contents=[image, prompt]
+    )
 
-    last_error = "Unknown error"
+    raw_text = response.text or ""
 
-    for model_name in models_to_try:
-        for key in api_keys:
-            try:
-                client = genai.Client(api_key=key)
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=[image, prompt]
-                )
-                extracted_text = response.text.strip() if (response and response.text) else "No text detected."
-                return {"latex": extracted_text, "text": extracted_text}
-            except Exception as e:
-                last_error = str(e)
-                error_msg = last_error.lower()
+    # Parse [DIAGRAM: ymin, xmin, ymax, xmax] tags
+    diagram_pattern = r'\[DIAGRAM:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]'
+    matches = re.findall(diagram_pattern, raw_text)
 
-                # Check for rate limit, capacity, or demand errors
-                rate_limit_keywords = ["429", "503", "rate limit", "quota", "unavailable", "resource_exhausted",
-                                       "exceeded", "high demand"]
+    # Replace diagram tags with base64 embedded markdown images
+    cleaned_latex = raw_text
+    for idx, match in enumerate(matches):
+        coords = [int(c) for c in match]
+        b64_img = crop_and_clean_diagram(image, coords)
 
-                if any(keyword in error_msg for keyword in rate_limit_keywords):
-                    time.sleep(0.5)
-                    continue
-
-                # If a model endpoint is retired or invalid (404), break loop to try the next model immediately
-                if "404" in error_msg or "not_found" in error_msg:
-                    break
-
-                return {"latex": f"OCR Processing Error: {last_error}", "text": f"OCR Processing Error: {last_error}"}
+        # Replace the tag with Markdown image tag
+        tag_str = f"[DIAGRAM: {match[0]}, {match[1]}, {match[2]}, {match[3]}]"
+        markdown_img = f"\n\n![]({b64_img})\n\n"
+        cleaned_latex = cleaned_latex.replace(tag_str, markdown_img)
 
     return {
-        "latex": f"Error: All API keys and valid model endpoints were attempted. Last response: {last_error}",
-        "text": "Error: All keys and models busy."
+        "latex": cleaned_latex,
+        "text": raw_text
     }
