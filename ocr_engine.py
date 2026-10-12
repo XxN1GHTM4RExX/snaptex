@@ -145,10 +145,11 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
         "4. For visual elements, classify them into one of two categories:\n"
         "   a. PRINTED ILLUSTRATIONS / SCHEMATICS / PHOTOS:\n"
         "      Return exact bounding boxes using: [CROP_DIAGRAM: ymin, xmin, ymax, xmax].\n"
-        "   b. HAND-DRAWN SKETCHES / GRAPHS / PLOTS:\n"
-        "      Do NOT generate Python code for pure text or mathematical equations. "
-        "      ONLY for actual geometric figures, coordinate axes, plots, or physical diagrams, output a self-contained "
-        "      Python script using `matplotlib`, `numpy`, and `scipy` that recreates the figure on a pure white (#FFFFFF) background. "
+        "   b. HAND-DRAWN SKETCHES / GRAPHS / CURVES:\n"
+        "      Do NOT crop hand-drawn graphs or distribution curves. "
+        "      ALWAYS output a self-contained Python script using `matplotlib`, `numpy`, and `scipy.stats` "
+        "      that recreates a publication-grade vector version of the graph on a pure white (#FFFFFF) background. "
+        "      Include proper labels, axis ticks, shaded regions under curves, and annotations matching the drawing. "
         "      Wrap the script inside ```python ... ``` block tags directly where the figure belongs in the document flow."
     )
 
