@@ -1,9 +1,12 @@
 import io
 import re
+import sys
 import base64
 import cv2
 import numpy as np
+import scipy
 import matplotlib
+
 matplotlib.use('Agg')  # Non-interactive backend for headless Render server
 import matplotlib.pyplot as plt
 from PIL import Image
@@ -12,7 +15,6 @@ from google import genai
 
 def crop_and_clean_diagram(image: Image.Image, coords: list) -> str:
     """Crops printed schematics/photos, removes page shadow gradients,
-
     boosts contrast, and returns base64 PNG string.
     """
     width, height = image.size
@@ -59,20 +61,26 @@ def crop_and_clean_diagram(image: Image.Image, coords: list) -> str:
 
 def render_matplotlib_code(code_str: str) -> str:
     """Safely executes generated Matplotlib code for hand-drawn sketches
-
     and returns a base64 PNG image on a pure #FFFFFF background.
     """
     buffer = io.BytesIO()
     plt.close('all')  # Clear any previous figures
 
-    # Safe execution namespace
+    # Store original recursion depth
+    orig_recursion = sys.getrecursionlimit()
+
+    # Safe execution namespace with SciPy support
     exec_globals = {
         "plt": plt,
         "np": np,
+        "scipy": scipy,
         "matplotlib": matplotlib
     }
 
     try:
+        # Cap recursion depth to prevent runaway loops
+        sys.setrecursionlimit(500)
+
         exec(code_str, exec_globals)
         plt.savefig(buffer, format="png", bbox_inches='tight', facecolor='white', dpi=300)
         plt.close('all')
@@ -80,14 +88,11 @@ def render_matplotlib_code(code_str: str) -> str:
         return f"data:image/png;base64,{img_str}"
     except Exception as e:
         plt.close('all')
-        # Fallback error placeholder image if execution fails
-        fig, ax = plt.subplots(figsize=(4, 2))
-        ax.text(0.5, 0.5, f"Diagram Rendering Error:\n{str(e)}", ha='center', va='center', color='red')
-        ax.axis('off')
-        plt.savefig(buffer, format="png", bbox_inches='tight', facecolor='white')
-        plt.close('all')
-        img_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
-        return f"data:image/png;base64,{img_str}"
+        # Render a lightweight textual error placeholder without re-triggering subplots
+        return f"**Diagram Rendering Error:** `{str(e)}`"
+    finally:
+        # Always restore default recursion ceiling
+        sys.setrecursionlimit(orig_recursion)
 
 
 def process_image_with_gemini(image_bytes: bytes) -> dict:
@@ -102,7 +107,7 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
         "   a. PRINTED ILLUSTRATIONS / SCHEMATICS / PHOTOS:\n"
         "      Return exact bounding boxes using: [CROP_DIAGRAM: ymin, xmin, ymax, xmax].\n"
         "   b. HAND-DRAWN SKETCHES / GRAPHS ON RULED PAPER:\n"
-        "      Do NOT crop. Instead, output a self-contained Python script using `matplotlib` and `numpy` "
+        "      Do NOT crop. Instead, output a self-contained Python script using `matplotlib`, `numpy`, and `scipy` "
         "      that recreates a clean, publication-grade version of the chart/diagram on a pure white (#FFFFFF) background. "
         "      Wrap the script inside ```python ... ``` block tags directly where the figure belongs in the document flow."
     )
@@ -134,9 +139,15 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
 
     for code in code_matches:
         if "plt." in code or "matplotlib" in code:
-            b64_img = render_matplotlib_code(code)
+            rendered_output = render_matplotlib_code(code)
             raw_block = f"```python\n{code}\n```"
-            markdown_img = f"\n\n![]({b64_img})\n\n"
+
+            # Format depending on whether rendering succeeded or failed
+            if rendered_output.startswith("data:image"):
+                markdown_img = f"\n\n![]({rendered_output})\n\n"
+            else:
+                markdown_img = f"\n\n{rendered_output}\n\n"
+
             cleaned_latex = cleaned_latex.replace(raw_block, markdown_img)
 
     return {
