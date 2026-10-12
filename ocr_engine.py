@@ -13,13 +13,12 @@ from PIL import Image
 from google import genai
 from google.genai.errors import APIError
 
-# Model pool ordered by rate-limit availability and reliability
+# Fully stocked model pool using all active Gemini Flash endpoints
 MODEL_POOL = [
     "gemini-2.5-flash",
+    "gemini-3.5-flash-lite",
     "gemini-1.5-flash",
     "gemini-1.5-flash-8b",
-    "gemini-2.0-flash",
-    "gemini-2.5-flash-lite",
 ]
 
 
