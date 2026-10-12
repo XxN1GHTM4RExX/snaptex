@@ -147,11 +147,12 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
         "      Return exact bounding boxes using: [CROP_DIAGRAM: ymin, xmin, ymax, xmax].\n"
         "   b. HAND-DRAWN SKETCHES / GRAPHS / CURVES:\n"
         "      ALWAYS output a self-contained Python script using `matplotlib.pyplot`, `numpy`, and `scipy.stats` "
-        "      that recreates a clean vector version of the chart/diagram on a pure white (#FFFFFF) background.\n"
+        "      that recreates clean vector versions of all drawn figures on a pure white (#FFFFFF) background.\n"
         "      CRITICAL SCRIPT RULES:\n"
-        "      - Write purely linear procedural code. Do NOT define custom recursive functions or custom classes.\n"
-        "      - For distribution curves, use `scipy.stats.norm.pdf()` and `plt.fill_between()` for shaded regions.\n"
-        "      - Do NOT attempt to render equations inside the plot; keep text annotations simple using `plt.text()` or `plt.annotate()`.\n"
+        "      - Write purely linear procedural code. Do NOT define custom recursive functions.\n"
+        "      - Transcribe and plot ALL numerical x-axis values, labels, percentages, and annotations shown in the original image using `plt.xticks()` or `plt.text()`.\n"
+        "      - If plotting multiple stacked graphs, adjust canvas height dynamically using `fig, axes = plt.subplots(N, 1, figsize=(8, 3.5 * N))` and end with `plt.tight_layout()` to ensure no graph is cut off.\n"
+        "      - For normal distribution curves, use `scipy.stats.norm.pdf()` and `plt.fill_between()` for shaded regions.\n"
         "      - Wrap the script inside ```python ... ``` block tags directly where the figure belongs in the document flow."
     )
 
