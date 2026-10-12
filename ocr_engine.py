@@ -149,15 +149,14 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
         "   a. PRINTED ILLUSTRATIONS / SCHEMATICS / PHOTOS:\n"
         "      Return exact bounding boxes using: [CROP_DIAGRAM: ymin, xmin, ymax, xmax].\n"
         "   b. HAND-DRAWN SKETCHES / GRAPHS / CURVES:\n"
-        "      Output a linear, procedural Python script using `matplotlib.pyplot`, `numpy`, and `scipy.stats` "
-        "      that recreates clean vector versions of all drawn figures on a pure white (#FFFFFF) background.\n"
-        "      STRICT CODING RULES:\n"
-        "      - Do NOT output python code for pure text or standard mathematical equations.\n"
-        "      - Write ONLY linear, procedural code (plt.subplots, plt.plot, plt.fill_between, plt.xticks, plt.text).\n"
-        "      - Absolutely NO custom function definitions (`def ...`), NO recursion, and NO loops.\n"
-        "      - Transcribe all numerical x-axis values and labels into `plt.xticks()` or `plt.text()`.\n"
-        "      - Always include bounding box coordinates in a comment at the top of the code block like `# BOUNDS: ymin, xmin, ymax, xmax`.\n"
-        "      - Wrap the script inside ```python ... ``` block tags directly where the figure belongs in the document flow."
+        "      Output a SEPARATE, standalone Python script for EACH individual graph or curve in the document.\n"
+        "      STRICT CODING RULES PER SCRIPT:\n"
+        "      - Write ONLY linear, procedural Matplotlib code for THAT SINGLE figure (fig, ax = plt.subplots(figsize=(6, 3))).\n"
+        "      - Do NOT combine multiple separate drawings into one giant script.\n"
+        "      - Write purely sequential code (plt.plot, plt.fill_between, plt.xticks, plt.text). Absolutely NO custom `def` functions, recursion, or loops.\n"
+        "      - Transcribe all x-axis values and region numbers (e.g. 34%, 13.5%, 2.35%, x-values) into `plt.xticks()` or `plt.text()`.\n"
+        "      - Always include bounding box coordinates in a comment at the top like `# BOUNDS: ymin, xmin, ymax, xmax` for fallback.\n"
+        "      - Wrap each script inside its own ```python ... ``` block tag directly where that specific figure belongs in the text flow."
     )
 
     client = genai.Client()
