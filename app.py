@@ -36,7 +36,7 @@ if uploaded_file is not None:
                     # Save to session state for Word export
                     st.session_state["latex_output"] = latex_content
                 else:
-                    st.error(f"Backend error: {response.status_code} - {response.text}")
+                    st.error(f"Backend error: {response.status_code}\n{response.text}")
             except Exception as e:
                 st.error(f"Failed to connect to backend: {str(e)}")
 
@@ -50,12 +50,18 @@ if "latex_output" in st.session_state and st.session_state["latex_output"]:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp_file:
             tmp_path = tmp_file.name
 
+        # Prepare extra args for Pandoc (use reference.docx if present)
+        extra_args = []
+        if os.path.exists("reference.docx"):
+            extra_args.append("--reference-doc=reference.docx")
+
         # Convert LaTeX to the temporary file using Streamlit's native Pandoc
         pypandoc.convert_text(
             st.session_state["latex_output"],
             to='docx',
             format='markdown+tex_math_dollars',
-            outputfile=tmp_path
+            outputfile=tmp_path,
+            extra_args=extra_args
         )
 
         # Read the generated docx file as bytes
