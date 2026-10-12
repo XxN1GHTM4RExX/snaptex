@@ -1,82 +1,56 @@
 import streamlit as st
 import requests
+import pypandoc
 import io
 
-# Set Page Config
-st.set_page_config(page_title="SnapTex - OCR Note Processing", page_icon="📝", layout="centered")
+BACKEND_URL = "https://your-render-app.onrender.com"  # Replace with your actual Render URL
 
-API_BASE_URL = "https://snaptex.onrender.com"  # Replace with your actual Render URL
+st.title("SnapTex - Mathematical OCR")
 
-st.title("SnapTex 📝")
-st.caption("Convert handwritten notes and mathematical formulas into formatted text and LaTeX.")
+uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
 
-
-# Silent wakeup ping to eliminate Render free tier cold starts
-@st.cache_data(ttl=300)
-def wakeup_backend():
-    try:
-        requests.get(f"{API_BASE_URL}/", timeout=5)
-    except Exception:
-        pass
-
-
-wakeup_backend()
-
-# File Uploader
-uploaded_file = st.file_uploader("Upload an image of your handwritten notes", type=["jpg", "jpeg", "png"])
-
-if uploaded_file:
+if uploaded_file is not None:
     st.image(uploaded_file, caption="Uploaded Document", use_column_width=True)
 
-    if st.button("Process Document", type="primary"):
-        with st.spinner("Processing document & converting formulas..."):
+    if st.button("Process Document"):
+        with st.spinner("Processing OCR with Gemini..."):
             try:
+                # 1. Send image to Render for Gemini OCR
                 files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
-                # Extended 120s timeout to allow Render boot + processing time
-                response = requests.post(f"{API_BASE_URL}/process-document", files=files, timeout=120)
+                response = requests.post(f"{BACKEND_URL}/process-document", files=files)
 
                 if response.status_code == 200:
                     data = response.json()
-                    st.session_state["extracted_result"] = data.get("latex", "")
-                    st.session_state["blur_score"] = data.get("blur_score", None)
+                    latex_content = data.get("latex", "")
+
+                    st.success("OCR Extraction Complete!")
+                    st.text_area("Extracted LaTeX / Text", latex_content, height=300)
+
+                    # Store in session state for export button
+                    st.session_state["latex_output"] = latex_content
                 else:
                     st.error(f"Backend error: {response.status_code} - {response.text}")
-            except requests.exceptions.Timeout:
-                st.error(
-                    "The backend server timed out while starting up or calling AI servers. Please click 'Process Document' again!")
             except Exception as e:
-                st.error(f"Could not connect to backend server: {str(e)}")
+                st.error(f"Failed to connect to backend: {str(e)}")
 
-# Display Results and Export Options
-if "extracted_result" in st.session_state and st.session_state["extracted_result"]:
-    result_text = st.session_state["extracted_result"]
+# 2. Convert to DOCX directly on Streamlit Cloud using Streamlit's local Pandoc
+if "latex_output" in st.session_state and st.session_state["latex_output"]:
+    if st.button("Export to Word (.docx)"):
+        with st.spinner("Generating native Word equations via Pandoc..."):
+            try:
+                # Direct local Pandoc conversion on Streamlit Cloud
+                docx_bytes = pypandoc.convert_text(
+                    st.session_state["latex_output"],
+                    to='docx',
+                    format='markdown+tex_math_dollars',
+                    outputfile=None
+                )
 
-    if "blur_score" in st.session_state and st.session_state["blur_score"] is not None:
-        st.info(f"Image Quality Score: {st.session_state['blur_score']:.2f}")
-
-    st.subheader("Extracted Output")
-    st.markdown(result_text)
-
-    # Guardrail: Only call export if output is valid transcribed text, not an error string
-    if not result_text.startswith("Error") and not result_text.startswith("Google AI") and not result_text.startswith(
-            "OCR Processing"):
-
-        # Call backend /export-docx route for styled document generation
-        try:
-            export_response = requests.post(
-                f"{API_BASE_URL}/export-docx",
-                json={"latex": result_text},
-                timeout=30
-            )
-
-            if export_response.status_code == 200:
                 st.download_button(
-                    label="📄 Download as Word Document (.docx)",
-                    data=export_response.content,
-                    file_name="SnapTex_Notes.docx",
+                    label="Download .docx File",
+                    data=docx_bytes,
+                    file_name="SnapTex_Transcribed_Notes.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 )
-            else:
-                st.warning("Word export service is currently unavailable.")
-        except Exception:
-            st.warning("Could not reach export engine.")
+            except Exception as e:
+                st.error(f"Pandoc conversion failed on Streamlit: {str(e)}")
