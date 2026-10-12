@@ -103,12 +103,10 @@ def render_matplotlib_code(code_str: str) -> str:
     and returns a base64 PNG image on a pure #FFFFFF background.
     """
     buffer = io.BytesIO()
-    plt.close('all')  # Clear any previous figures
+    plt.close('all')
 
-    # Store original recursion depth
     orig_recursion = sys.getrecursionlimit()
 
-    # Safe execution namespace with SciPy support
     exec_globals = {
         "plt": plt,
         "np": np,
@@ -116,21 +114,22 @@ def render_matplotlib_code(code_str: str) -> str:
         "matplotlib": matplotlib
     }
 
-    try:
-        # Cap recursion depth to prevent runaway loops
-        sys.setrecursionlimit(500)
+    # Clean markdown formatting
+    cleaned_code = code_str.replace("```python", "").replace("```", "").strip()
 
-        exec(code_str, exec_globals)
+    try:
+        sys.setrecursionlimit(200)
+
+        exec(cleaned_code, exec_globals)
         plt.savefig(buffer, format="png", bbox_inches='tight', facecolor='white', dpi=300)
         plt.close('all')
         img_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
         return f"data:image/png;base64,{img_str}"
     except Exception as e:
         plt.close('all')
-        # Render a lightweight textual error placeholder without re-triggering subplots
+        print(f"Matplotlib execution error: {e}")
         return f"**Diagram Rendering Error:** `{str(e)}`"
     finally:
-        # Always restore default recursion ceiling
         sys.setrecursionlimit(orig_recursion)
 
 
@@ -142,17 +141,16 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
         "1. Ignore vertical, rotated, or sideways text printed on the extreme outer page margins.\n"
         "2. Convert mathematical expressions into standard LaTeX syntax using $...$ for inline math and $$...$$ for display math.\n"
         "3. Format all tables using strict Markdown table syntax. Each table row MUST be on a single continuous line starting and ending with '|'. Always include the delimiter row (| --- | --- |).\n"
-        "4. For visual elements, classify them into one of two categories:\n"
+        "4. For visual elements, pick EXACTLY ONE category per figure:\n"
         "   a. PRINTED ILLUSTRATIONS / SCHEMATICS / PHOTOS:\n"
         "      Return exact bounding boxes using: [CROP_DIAGRAM: ymin, xmin, ymax, xmax].\n"
         "   b. HAND-DRAWN SKETCHES / GRAPHS / CURVES:\n"
-        "      ALWAYS output a self-contained Python script using `matplotlib.pyplot`, `numpy`, and `scipy.stats` "
+        "      Do NOT output [CROP_DIAGRAM] tags. Instead, output a simple Python script using `matplotlib.pyplot`, `numpy`, and `scipy.stats` "
         "      that recreates clean vector versions of all drawn figures on a pure white (#FFFFFF) background.\n"
-        "      CRITICAL SCRIPT RULES:\n"
-        "      - Write purely linear procedural code. Do NOT define custom recursive functions.\n"
-        "      - Transcribe and plot ALL numerical x-axis values, labels, percentages, and annotations shown in the original image using `plt.xticks()` or `plt.text()`.\n"
-        "      - If plotting multiple stacked graphs, adjust canvas height dynamically using `fig, axes = plt.subplots(N, 1, figsize=(8, 3.5 * N))` and end with `plt.tight_layout()` to ensure no graph is cut off.\n"
-        "      - For normal distribution curves, use `scipy.stats.norm.pdf()` and `plt.fill_between()` for shaded regions.\n"
+        "      STRICT CODING RULES:\n"
+        "      - Write ONLY linear, procedural Matplotlib code (e.g., plt.subplots, plt.plot, plt.fill_between, plt.xticks).\n"
+        "      - Absolutely NO custom function definitions (`def ...`), NO recursion, and NO loops.\n"
+        "      - Include all x-axis numbers and annotations directly in `plt.xticks()` or `plt.text()`.\n"
         "      - Wrap the script inside ```python ... ``` block tags directly where the figure belongs in the document flow."
     )
 
