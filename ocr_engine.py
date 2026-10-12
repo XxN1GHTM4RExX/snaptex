@@ -14,7 +14,7 @@ from PIL import Image
 from google import genai
 from google.genai.errors import APIError
 
-# Model pool with active model identifiers
+# Model pool with active model identifiers for fallback rotation
 MODEL_POOL = [
     "gemini-2.5-flash",
     "gemini-3.5-flash-lite",
@@ -25,6 +25,7 @@ MODEL_POOL = [
 
 def generate_with_model_fallback(client: genai.Client, contents: list) -> str:
     """Tries the primary model first, rotating through fallbacks if rate limits (429)
+
     or API errors occur.
     """
     last_exception = None
@@ -39,11 +40,11 @@ def generate_with_model_fallback(client: genai.Client, contents: list) -> str:
             if response.text:
                 return response.text
         except APIError as e:
-            print(f"Model {model_name} failed with API error: {e}. Rotating...")
+            print(f"Model {model_name} failed with API error: {e}. Rotating to next model...")
             last_exception = e
             continue
         except Exception as e:
-            print(f"Unexpected error on {model_name}: {e}. Rotating...")
+            print(f"Unexpected error on {model_name}: {e}. Rotating to next model...")
             last_exception = e
             continue
 
@@ -52,15 +53,20 @@ def generate_with_model_fallback(client: genai.Client, contents: list) -> str:
 
 def crop_and_clean_diagram(image: Image.Image, coords: list) -> str:
     """Crops printed schematics/photos, removes page shadow gradients,
+
     boosts contrast, and returns base64 PNG string.
     """
     width, height = image.size
     ymin, xmin, ymax, xmax = coords
 
-    left = max(0, int((xmin / 1000.0) * width) - int((xmax - xmin) * 0.05))
-    top = max(0, int((ymin / 1000.0) * height) - int((ymax - ymin) * 0.05))
-    right = min(width, int((xmax / 1000.0) * width) + int((xmax - xmin) * 0.05))
-    bottom = min(height, int((ymax / 1000.0) * height) + int((ymax - ymin) * 0.05))
+    # Add 5% safety margin padding
+    pad_w = int((xmax - xmin) * 0.05)
+    pad_h = int((ymax - ymin) * 0.05)
+
+    left = max(0, int((xmin / 1000.0) * width) - pad_w)
+    top = max(0, int((ymin / 1000.0) * height) - pad_h)
+    right = min(width, int((xmax / 1000.0) * width) + pad_w)
+    bottom = min(height, int((ymax / 1000.0) * height) + pad_h)
 
     cropped = image.crop((left, top, right, bottom))
     img_np = np.array(cropped)
@@ -80,12 +86,18 @@ def crop_and_clean_diagram(image: Image.Image, coords: list) -> str:
 
 
 def sanitize_code(code_str: str) -> str:
-    """Strips function definitions and unsafe constructs from code_str using AST parsing."""
+    """Strips function definitions and unsafe constructs using AST parsing
+
+    to prevent recursive execution loops.
+    """
     cleaned = code_str.replace("```python", "").replace("```", "").strip()
     try:
         parsed = ast.parse(cleaned)
-        # Remove function definitions to block recursive calls
-        filtered_body = [node for node in parsed.body if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+        # Remove function/class definitions to block recursive calls
+        filtered_body = [
+            node for node in parsed.body
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        ]
         parsed.body = filtered_body
         return ast.unparse(parsed)
     except Exception:
@@ -94,7 +106,10 @@ def sanitize_code(code_str: str) -> str:
 
 
 def render_matplotlib_code(code_str: str) -> str:
-    """Executes Matplotlib code cleanly in an isolated scope with recursion guards."""
+    """Executes Matplotlib code cleanly in an isolated scope.
+
+    Returns base64 string on success, or None on error to trigger crop fallback.
+    """
     buffer = io.BytesIO()
     plt.close('all')
 
@@ -116,8 +131,8 @@ def render_matplotlib_code(code_str: str) -> str:
         return f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode('utf-8')}"
     except Exception as e:
         plt.close('all')
-        print(f"Matplotlib execution error: {e}")
-        return f"**Diagram Rendering Error:** `{str(e)}`"
+        print(f"Matplotlib execution failed: {e}. Falling back to image crop.")
+        return None  # Triggers crop fallback
     finally:
         sys.setrecursionlimit(orig_recursion)
 
@@ -134,12 +149,14 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
         "   a. PRINTED ILLUSTRATIONS / SCHEMATICS / PHOTOS:\n"
         "      Return exact bounding boxes using: [CROP_DIAGRAM: ymin, xmin, ymax, xmax].\n"
         "   b. HAND-DRAWN SKETCHES / GRAPHS / CURVES:\n"
-        "      Do NOT output [CROP_DIAGRAM] tags for hand-drawn plots. Instead, output a procedural Python script using `matplotlib.pyplot`, `numpy`, and `scipy.stats` "
+        "      Output a linear, procedural Python script using `matplotlib.pyplot`, `numpy`, and `scipy.stats` "
         "      that recreates clean vector versions of all drawn figures on a pure white (#FFFFFF) background.\n"
         "      STRICT CODING RULES:\n"
+        "      - Do NOT output python code for pure text or standard mathematical equations.\n"
         "      - Write ONLY linear, procedural code (plt.subplots, plt.plot, plt.fill_between, plt.xticks, plt.text).\n"
-        "      - Do NOT define custom functions (`def ...`) or classes.\n"
+        "      - Absolutely NO custom function definitions (`def ...`), NO recursion, and NO loops.\n"
         "      - Transcribe all numerical x-axis values and labels into `plt.xticks()` or `plt.text()`.\n"
+        "      - Always include bounding box coordinates in a comment at the top of the code block like `# BOUNDS: ymin, xmin, ymax, xmax`.\n"
         "      - Wrap the script inside ```python ... ``` block tags directly where the figure belongs in the document flow."
     )
 
@@ -157,7 +174,7 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
         tag_str = f"[CROP_DIAGRAM: {match[0]}, {match[1]}, {match[2]}, {match[3]}]"
         cleaned_latex = cleaned_latex.replace(tag_str, f"\n\n![]({b64_img})\n\n")
 
-    # 2. Process Path B: Render Matplotlib code blocks
+    # 2. Process Path B: Render Matplotlib code blocks with dynamic crop fallback
     python_block_pattern = r'```python\s*(.*?)\s*```'
     code_matches = re.findall(python_block_pattern, cleaned_latex, re.DOTALL)
 
@@ -166,10 +183,17 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
             rendered_output = render_matplotlib_code(code)
             raw_block = f"```python\n{code}\n```"
 
-            if rendered_output.startswith("data:image"):
+            if rendered_output:
                 markdown_img = f"\n\n![]({rendered_output})\n\n"
             else:
-                markdown_img = f"\n\n{rendered_output}\n\n"
+                # Fallback: Extract bounds comment if available, otherwise fallback to full crop
+                bounds_match = re.search(r'#\s*BOUNDS:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)', code)
+                if bounds_match:
+                    coords = [int(c) for c in bounds_match.groups()]
+                    b64_img = crop_and_clean_diagram(image, coords)
+                    markdown_img = f"\n\n![]({b64_img})\n\n"
+                else:
+                    markdown_img = ""
 
             cleaned_latex = cleaned_latex.replace(raw_block, markdown_img)
 
