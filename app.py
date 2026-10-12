@@ -3,7 +3,7 @@ import requests
 import pypandoc
 import io
 
-BACKEND_URL = "https://your-render-app.onrender.com"  # Replace with your actual Render URL
+BACKEND_URL = "https://snaptex.onrender.com"  # Replace with your actual Render URL
 
 st.title("SnapTex - Mathematical OCR")
 
