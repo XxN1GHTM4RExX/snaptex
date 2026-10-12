@@ -3,14 +3,17 @@ import re
 import base64
 import cv2
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend for headless Render server
+import matplotlib.pyplot as plt
 from PIL import Image
 from google import genai
 
 
 def crop_and_clean_diagram(image: Image.Image, coords: list) -> str:
-    """Crops diagram region, normalizes shadow gradients across the page,
+    """Crops printed schematics/photos, removes page shadow gradients,
 
-    cleans background to crisp white, and reinforces pencil strokes.
+    boosts contrast, and returns base64 PNG string.
     """
     width, height = image.size
     ymin, xmin, ymax, xmax = coords
@@ -37,31 +40,54 @@ def crop_and_clean_diagram(image: Image.Image, coords: list) -> str:
     # 4. Convert to Grayscale
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
 
-    # 5. Illumination Normalization (removes dark room/page shadows completely)
-    dilated = cv2.dilate(gray, np.ones((7, 7), np.uint8))
-    bg_img = cv2.medianBlur(dilated, 21)
-    diff_img = 255 - cv2.absdiff(gray, bg_img)
-    norm_img = cv2.normalize(diff_img, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8UC1)
+    # 5. Remove shadow gradients using morphological background division
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
+    bg = cv2.morphologyEx(gray, cv2.MORPH_DILATE, kernel)
+    norm_img = cv2.divide(gray, bg, scale=255)
 
-    # 6. Smooth paper texture gently
-    blurred = cv2.GaussianBlur(norm_img, (3, 3), 0)
+    # 6. Apply CLAHE for crisp contrast on printed lines
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(norm_img)
 
-    # 7. Adaptive Thresholding (C=15 ignores light notebook paper grain)
-    cleaned_bw = cv2.adaptiveThreshold(
-        blurred,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        blockSize=25,
-        C=15
-    )
-
-    # 8. Convert OpenCV array back to PIL Image & Base64
-    cleaned_image = Image.fromarray(cleaned_bw)
+    # 7. Convert back to PIL Image & Base64
+    cleaned_image = Image.fromarray(enhanced)
     buffer = io.BytesIO()
     cleaned_image.save(buffer, format="PNG")
     img_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
     return f"data:image/png;base64,{img_str}"
+
+
+def render_matplotlib_code(code_str: str) -> str:
+    """Safely executes generated Matplotlib code for hand-drawn sketches
+
+    and returns a base64 PNG image on a pure #FFFFFF background.
+    """
+    buffer = io.BytesIO()
+    plt.close('all')  # Clear any previous figures
+
+    # Safe execution namespace
+    exec_globals = {
+        "plt": plt,
+        "np": np,
+        "matplotlib": matplotlib
+    }
+
+    try:
+        exec(code_str, exec_globals)
+        plt.savefig(buffer, format="png", bbox_inches='tight', facecolor='white', dpi=300)
+        plt.close('all')
+        img_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        return f"data:image/png;base64,{img_str}"
+    except Exception as e:
+        plt.close('all')
+        # Fallback error placeholder image if execution fails
+        fig, ax = plt.subplots(figsize=(4, 2))
+        ax.text(0.5, 0.5, f"Diagram Rendering Error:\n{str(e)}", ha='center', va='center', color='red')
+        ax.axis('off')
+        plt.savefig(buffer, format="png", bbox_inches='tight', facecolor='white')
+        plt.close('all')
+        img_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        return f"data:image/png;base64,{img_str}"
 
 
 def process_image_with_gemini(image_bytes: bytes) -> dict:
@@ -72,9 +98,13 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
         "1. Ignore vertical, rotated, or sideways text printed on the extreme outer page margins.\n"
         "2. Convert mathematical expressions into standard LaTeX syntax using $...$ for inline math and $$...$$ for display math.\n"
         "3. Format all tables using strict Markdown table syntax. Each table row MUST be on a single continuous line starting and ending with '|'. Always include the delimiter row (| --- | --- |).\n"
-        "4. If there are any photo illustrations, schematics, graphs, or visual drawings, identify their location "
-        "and return bounding boxes in normalized 0-1000 coordinates using exact tags like: [DIAGRAM: ymin, xmin, ymax, xmax]. "
-        "Place the [DIAGRAM: ...] tag directly where the image appears in the document flow."
+        "4. For visual elements, classify them into one of two categories:\n"
+        "   a. PRINTED ILLUSTRATIONS / SCHEMATICS / PHOTOS:\n"
+        "      Return exact bounding boxes using: [CROP_DIAGRAM: ymin, xmin, ymax, xmax].\n"
+        "   b. HAND-DRAWN SKETCHES / GRAPHS ON RULED PAPER:\n"
+        "      Do NOT crop. Instead, output a self-contained Python script using `matplotlib` and `numpy` "
+        "      that recreates a clean, publication-grade version of the chart/diagram on a pure white (#FFFFFF) background. "
+        "      Wrap the script inside ```python ... ``` block tags directly where the figure belongs in the document flow."
     )
 
     client = genai.Client()
@@ -84,19 +114,30 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
     )
 
     raw_text = response.text or ""
-
-    # Parse [DIAGRAM: ymin, xmin, ymax, xmax] tags
-    diagram_pattern = r'\[DIAGRAM:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]'
-    matches = re.findall(diagram_pattern, raw_text)
-
     cleaned_latex = raw_text
-    for match in matches:
+
+    # 1. Process Path A: Crop printed schematics [CROP_DIAGRAM: ymin, xmin, ymax, xmax]
+    crop_pattern = r'\[CROP_DIAGRAM:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]'
+    crop_matches = re.findall(crop_pattern, cleaned_latex)
+
+    for match in crop_matches:
         coords = [int(c) for c in match]
         b64_img = crop_and_clean_diagram(image, coords)
 
-        tag_str = f"[DIAGRAM: {match[0]}, {match[1]}, {match[2]}, {match[3]}]"
+        tag_str = f"[CROP_DIAGRAM: {match[0]}, {match[1]}, {match[2]}, {match[3]}]"
         markdown_img = f"\n\n![]({b64_img})\n\n"
         cleaned_latex = cleaned_latex.replace(tag_str, markdown_img)
+
+    # 2. Process Path B: Render Matplotlib code blocks for hand-drawn sketches
+    python_block_pattern = r'```python\s*(.*?)\s*```'
+    code_matches = re.findall(python_block_pattern, cleaned_latex, re.DOTALL)
+
+    for code in code_matches:
+        if "plt." in code or "matplotlib" in code:
+            b64_img = render_matplotlib_code(code)
+            raw_block = f"```python\n{code}\n```"
+            markdown_img = f"\n\n![]({b64_img})\n\n"
+            cleaned_latex = cleaned_latex.replace(raw_block, markdown_img)
 
     return {
         "latex": cleaned_latex,
