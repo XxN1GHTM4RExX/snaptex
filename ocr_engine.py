@@ -8,10 +8,9 @@ from google import genai
 
 
 def crop_and_clean_diagram(image: Image.Image, coords: list) -> str:
-    """Crops a diagram region based on [ymin, xmin, ymax, xmax] (0-1000 scale),
+    """Crops diagram region, removes blue/cyan notebook lines using HSV thresholding,
 
-    cleans background to pure white (#FFFFFF), reinforces lines to pure black,
-    and returns a base64 PNG string.
+    smooths pencil strokes, and returns base64 PNG string.
     """
     width, height = image.size
     ymin, xmin, ymax, xmax = coords
@@ -33,25 +32,34 @@ def crop_and_clean_diagram(image: Image.Image, coords: list) -> str:
 
     # 3. Crop image
     cropped = image.crop((left, top, right, bottom))
-
-    # 4. Convert PIL Image to OpenCV numpy array (RGB to BGR/Gray)
     img_np = np.array(cropped)
+
+    # 4. Convert RGB to HSV to isolate blue/cyan ruled notebook lines
+    hsv = cv2.cvtColor(img_np, cv2.COLOR_RGB2HSV)
+
+    # Range for typical blue/cyan notebook lines
+    lower_blue = np.array([80, 20, 20])
+    upper_blue = np.array([140, 255, 255])
+
+    # Mask out blue lines and turn them pure white in the RGB image
+    blue_mask = cv2.inRange(hsv, lower_blue, upper_blue)
+    img_np[blue_mask > 0] = [255, 255, 255]
+
+    # 5. Convert modified image to Grayscale
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
 
-    # 5. Adaptive Thresholding: Background to #FFFFFF, lines to pure black
-    cleaned_bw = cv2.adaptiveThreshold(
-        gray,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        blockSize=15,
-        C=8
-    )
+    # 6. Smooth image to eliminate paper grain noise
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
 
-    # 6. Convert OpenCV B&W array back to PIL Image
+    # 7. Otsu's thresholding to separate dark pencil lines from paper
+    _, binarized = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # 8. Morphological closing (reconnects brittle/dotted pencil strokes)
+    kernel = np.ones((2, 2), np.uint8)
+    cleaned_bw = cv2.morphologyEx(binarized, cv2.MORPH_CLOSE, kernel)
+
+    # 9. Convert OpenCV array back to PIL Image & Base64
     cleaned_image = Image.fromarray(cleaned_bw)
-
-    # 7. Convert to Base64 PNG string
     buffer = io.BytesIO()
     cleaned_image.save(buffer, format="PNG")
     img_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
