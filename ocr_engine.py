@@ -8,9 +8,9 @@ from google import genai
 
 
 def crop_and_clean_diagram(image: Image.Image, coords: list) -> str:
-    """Crops diagram region, removes blue/cyan notebook lines using HSV thresholding,
+    """Crops diagram region, normalizes shadow gradients across the page,
 
-    smooths pencil strokes, and returns base64 PNG string.
+    cleans background to crisp white, and reinforces pencil strokes.
     """
     width, height = image.size
     ymin, xmin, ymax, xmax = coords
@@ -34,31 +34,29 @@ def crop_and_clean_diagram(image: Image.Image, coords: list) -> str:
     cropped = image.crop((left, top, right, bottom))
     img_np = np.array(cropped)
 
-    # 4. Convert RGB to HSV to isolate blue/cyan ruled notebook lines
-    hsv = cv2.cvtColor(img_np, cv2.COLOR_RGB2HSV)
-
-    # Range for typical blue/cyan notebook lines
-    lower_blue = np.array([80, 20, 20])
-    upper_blue = np.array([140, 255, 255])
-
-    # Mask out blue lines and turn them pure white in the RGB image
-    blue_mask = cv2.inRange(hsv, lower_blue, upper_blue)
-    img_np[blue_mask > 0] = [255, 255, 255]
-
-    # 5. Convert modified image to Grayscale
+    # 4. Convert to Grayscale
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
 
-    # 6. Smooth image to eliminate paper grain noise
-    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    # 5. Illumination Normalization (removes dark room/page shadows completely)
+    dilated = cv2.dilate(gray, np.ones((7, 7), np.uint8))
+    bg_img = cv2.medianBlur(dilated, 21)
+    diff_img = 255 - cv2.absdiff(gray, bg_img)
+    norm_img = cv2.normalize(diff_img, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8UC1)
 
-    # 7. Otsu's thresholding to separate dark pencil lines from paper
-    _, binarized = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # 6. Smooth paper texture gently
+    blurred = cv2.GaussianBlur(norm_img, (3, 3), 0)
 
-    # 8. Morphological closing (reconnects brittle/dotted pencil strokes)
-    kernel = np.ones((2, 2), np.uint8)
-    cleaned_bw = cv2.morphologyEx(binarized, cv2.MORPH_CLOSE, kernel)
+    # 7. Adaptive Thresholding (C=15 ignores light notebook paper grain)
+    cleaned_bw = cv2.adaptiveThreshold(
+        blurred,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        blockSize=25,
+        C=15
+    )
 
-    # 9. Convert OpenCV array back to PIL Image & Base64
+    # 8. Convert OpenCV array back to PIL Image & Base64
     cleaned_image = Image.fromarray(cleaned_bw)
     buffer = io.BytesIO()
     cleaned_image.save(buffer, format="PNG")
