@@ -5,7 +5,7 @@ import tempfile
 import os
 
 # Backend Render API URL
-BACKEND_URL = "https://tex001.onrender.com"  # Update with your exact Render backend URL
+BACKEND_URL = "https://snaptex.onrender.com"  # Update with your exact Render backend URL
 
 st.set_page_config(page_title="SnapTex", page_icon="📐", layout="centered")
 
