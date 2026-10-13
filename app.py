@@ -12,8 +12,8 @@ from supabase import create_client
 BACKEND_URL = "https://snaptex.onrender.com"  # Update with your exact Render backend URL
 
 # Supabase Credentials for Direct Auth Client in Streamlit
-SUPABASE_URL = "https://your-project-id.supabase.co"  # Replace with your Supabase URL
-SUPABASE_KEY = "your-anon-key"  # Replace with your Supabase anon key
+SUPABASE_URL = "https://vjlnjwlarhznomhxtcgd.supabase.co"  # Replace with your Supabase URL
+SUPABASE_KEY = "sb_publishable_vo0NHPSxsNswuWX0BA34ew_RmsOFfhP"  # Replace with your Supabase anon key
 
 st.set_page_config(page_title="SnapTex", page_icon="📐", layout="centered")
 
