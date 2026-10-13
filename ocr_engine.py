@@ -17,9 +17,12 @@ from google.genai.errors import APIError
 # Updated Model Pool using official, stable Gemini endpoints
 # Updated Model Pool with official Gemini 3.8 endpoints
 # Updated Model Pool in backend/ocr_engine.py
+# Optimal, zero-delay Flash model pool for backend/ocr_engine.py
 MODEL_POOL = [
-    "gemini-3.8-flash",
-    "gemini-3.8-pro"
+    "gemini-1.5-flash-latest",  # Fast, primary workhorse
+    "gemini-1.5-flash",         # Active standard Flash fallback
+    "gemini-3.8-flash",         # Google's newest, highly reliable endpoint
+    "gemini-2.5-flash"          # Active backup endpoint
 ]
 
 
