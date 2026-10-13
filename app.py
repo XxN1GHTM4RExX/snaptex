@@ -313,7 +313,7 @@ if uploaded_file is not None:
                         files=files,
                         data=data_payload,
                         headers=headers,
-                        timeout=60
+                        timeout=120
                     )
 
                     if response.status_code == 200:
