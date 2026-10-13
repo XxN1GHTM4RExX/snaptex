@@ -95,12 +95,13 @@ def df_to_markdown_table(df: pd.DataFrame) -> str:
 
 
 def apply_table_borders(docx_path: str):
-    """Parses the generated docx file and forces explicit XML table grid borders
-    on every table element.
+    """Parses the generated docx file, forces explicit XML table grid borders,
+    and prevents rows from splitting across page boundaries (fixing duplicate row exports).
     """
     doc = Document(docx_path)
 
     for table in doc.tables:
+        # 1. Force explicit table borders
         tblPr = table._tbl.tblPr
         tblBorders = tblPr.find(qn('w:tblBorders'))
         if tblBorders is not None:
@@ -116,6 +117,12 @@ def apply_table_borders(docx_path: str):
             new_borders.append(border)
 
         tblPr.append(new_borders)
+
+        # 2. Prevent row splitting across page boundaries
+        for row in table.rows:
+            trPr = row._tr.get_or_add_trPr()
+            cantSplit = OxmlElement('w:cantSplit')
+            trPr.append(cantSplit)
 
     doc.save(docx_path)
 

@@ -1,6 +1,6 @@
 import io
 import os
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client
 
@@ -117,7 +117,7 @@ def delete_history_item(transcription_id: str, authorization: str = Header(...))
 @app.patch("/history/{transcription_id}")
 def rename_history_item(
     transcription_id: str,
-    new_filename: str,
+    new_filename: str = Query(...),
     authorization: str = Header(...)
 ):
     """Renames a specific transcription record belonging to the authenticated user."""
