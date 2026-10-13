@@ -39,10 +39,10 @@ def replace_base64_with_temp_files(markdown_text: str, temp_dir: str) -> str:
 
 def create_docx_from_transcription(transcription_text: str, filename: str = "SnapTex_Doc") -> io.BytesIO:
     """Converts Gemini's Markdown + LaTeX transcription into a native Word (.docx)
-    document with formatted math equations and clean embedded images using Pandoc.
+
+    document with formatted math equations, clean embedded images, and custom table borders.
     """
     with tempfile.TemporaryDirectory() as temp_dir:
-        # Pre-process base64 images into physical temp files for Pandoc
         sanitized_markdown = replace_base64_with_temp_files(transcription_text, temp_dir)
 
         md_path = os.path.join(temp_dir, "input.md")
@@ -51,15 +51,20 @@ def create_docx_from_transcription(transcription_text: str, filename: str = "Sna
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(sanitized_markdown)
 
-        # Pandoc converts Markdown + LaTeX directly into native DOCX math elements
+        # Path to your reference template (e.g., located in your backend root directory)
+        ref_doc_path = os.path.abspath("reference.docx")
+
+        extra_args = ['--from=markdown+tex_math_dollars']
+        if os.path.exists(ref_doc_path):
+            extra_args.append(f'--reference-doc={ref_doc_path}')
+
         pypandoc.convert_file(
             md_path,
             'docx',
             outputfile=docx_path,
-            extra_args=['--from=markdown+tex_math_dollars']
+            extra_args=extra_args
         )
 
-        # Read converted bytes into memory buffer
         with open(docx_path, "rb") as f:
             file_stream = io.BytesIO(f.read())
             file_stream.seek(0)
