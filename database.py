@@ -58,17 +58,16 @@ def fetch_recent_transcriptions(access_token: str, limit: int = 10) -> list:
 
 
 def update_transcription_filename(transcription_id: str, new_filename: str, access_token: str) -> dict:
-    """Updates the filename of a specific transcription record safely."""
+    """Updates the filename of a specific transcription record in-place."""
     try:
         supabase = get_supabase_client(access_token=access_token)
         response = supabase.table("transcriptions").update({"filename": new_filename}).eq("id",
                                                                                           transcription_id).execute()
 
-        # Only return the updated row if Supabase executed the update successfully
         if response.data and len(response.data) > 0:
             return response.data[0]
 
-        print(f"Supabase update affected 0 rows for transcription ID: {transcription_id}")
+        print(f"No matching row found for transcription ID: {transcription_id}")
         return None
     except Exception as e:
         print(f"Database update failed: {e}")
