@@ -22,12 +22,12 @@ def get_supabase_client(access_token: str = None) -> Client:
 
 
 def save_transcription(
-    filename: str,
-    markdown_content: str,
-    blur_score: float,
-    whitening_enabled: bool,
-    user_id: str,
-    access_token: str
+        filename: str,
+        markdown_content: str,
+        blur_score: float,
+        whitening_enabled: bool,
+        user_id: str,
+        access_token: str
 ) -> dict:
     """Saves a transcription record to the Supabase database under the user's ID."""
     try:
@@ -61,10 +61,15 @@ def update_transcription_filename(transcription_id: str, new_filename: str, acce
     """Updates the filename of a specific transcription record safely."""
     try:
         supabase = get_supabase_client(access_token=access_token)
-        response = supabase.table("transcriptions").update({"filename": new_filename}).eq("id", transcription_id).execute()
+        response = supabase.table("transcriptions").update({"filename": new_filename}).eq("id",
+                                                                                          transcription_id).execute()
+
+        # Only return the updated row if Supabase executed the update successfully
         if response.data and len(response.data) > 0:
             return response.data[0]
-        return {"id": transcription_id, "filename": new_filename}
+
+        print(f"Supabase update affected 0 rows for transcription ID: {transcription_id}")
+        return None
     except Exception as e:
         print(f"Database update failed: {e}")
-        return {}
+        return None
