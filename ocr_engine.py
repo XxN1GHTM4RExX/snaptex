@@ -53,7 +53,7 @@ def generate_with_model_fallback(client: genai.Client, contents: list) -> str:
 def crop_and_clean_diagram(image: Image.Image, coords: list, aggressive_whitening: bool = False) -> str:
     """Crops diagrams.
 
-    If aggressive_whitening is True, forces backgrounds to pure white for exam line art.
+    If aggressive_whitening is True, forces background to pure white for exam line art.
     If False, uses soft CLAHE contrast enhancement to preserve photo detail.
     """
     width, height = image.size
@@ -74,12 +74,14 @@ def crop_and_clean_diagram(image: Image.Image, coords: list, aggressive_whitenin
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
 
     if aggressive_whitening:
-        # Mode A: Aggressive background thresholding for line art / exam diagrams
+        # Mode A: Binary background whitening for line art / exam diagrams
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 30))
         bg = cv2.morphologyEx(gray, cv2.MORPH_DILATE, kernel)
         norm = cv2.divide(gray, bg, scale=255)
-        _, white_bg = cv2.threshold(norm, 205, 255, cv2.THRESH_TRUNC)
-        final_img = cv2.normalize(white_bg, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
+
+        # Force light background pixels directly to pure white (255)
+        _, binary_mask = cv2.threshold(norm, 190, 255, cv2.THRESH_BINARY)
+        final_img = cv2.normalize(binary_mask, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
     else:
         # Mode B: Soft CLAHE contrast balance for complex photos / book scans
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 40))
@@ -192,7 +194,6 @@ def process_image_with_gemini(image_bytes: bytes, aggressive_whitening: bool = F
             if rendered_output:
                 markdown_img = f"\n\n![]({rendered_output})\n\n"
             else:
-                # Fallback: Extract bounds comment if available, otherwise fallback to full crop
                 bounds_match = re.search(r'#\s*BOUNDS:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)', code)
                 if bounds_match:
                     coords = [int(c) for c in bounds_match.groups()]
