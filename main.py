@@ -117,7 +117,7 @@ def delete_history_item(transcription_id: str, authorization: str = Header(...))
 @app.patch("/history/{transcription_id}")
 def rename_history_item(
     transcription_id: str,
-    new_filename: str = Form(...),
+    new_filename: str,
     authorization: str = Header(...)
 ):
     """Renames a specific transcription record belonging to the authenticated user."""

@@ -31,7 +31,7 @@ st.title("SnapTex - Mathematical OCR & Export")
 
 
 def parse_markdown_to_blocks(markdown_text: str) -> list:
-    """Parses raw Markdown content into visual blocks (text blocks vs. table blocks)."""
+    """Parses raw Markdown content into visual blocks, skipping empty lines and whitespace."""
     blocks = []
     lines = markdown_text.split("\n")
     current_text = []
@@ -39,23 +39,33 @@ def parse_markdown_to_blocks(markdown_text: str) -> list:
     in_table = False
 
     for line in lines:
-        if line.strip().startswith("|") and line.strip().endswith("|"):
+        stripped = line.strip()
+        if stripped.startswith("|") and stripped.endswith("|"):
             if current_text:
-                blocks.append({"type": "text", "content": "\n".join(current_text)})
+                text_content = "\n".join(current_text).strip()
+                if text_content:
+                    blocks.append({"type": "text", "content": text_content})
                 current_text = []
             in_table = True
             table_lines.append(line)
         else:
             if in_table:
-                blocks.append({"type": "table", "content": "\n".join(table_lines)})
+                table_content = "\n".join(table_lines).strip()
+                if table_content:
+                    blocks.append({"type": "table", "content": table_content})
                 table_lines = []
                 in_table = False
-            current_text.append(line)
+            if stripped:
+                current_text.append(line)
 
     if current_text:
-        blocks.append({"type": "text", "content": "\n".join(current_text)})
+        text_content = "\n".join(current_text).strip()
+        if text_content:
+            blocks.append({"type": "text", "content": text_content})
     if table_lines:
-        blocks.append({"type": "table", "content": "\n".join(table_lines)})
+        table_content = "\n".join(table_lines).strip()
+        if table_content:
+            blocks.append({"type": "table", "content": table_content})
 
     return blocks
 
@@ -212,7 +222,7 @@ if st.session_state["auth_token"]:
                         doc_id = selected_doc.get("id")
                         rename_res = requests.patch(
                             f"{BACKEND_URL}/history/{doc_id}",
-                            data={"new_filename": new_title.strip()},
+                            params={"new_filename": new_title.strip()},
                             headers=headers
                         )
                         if rename_res.status_code == 200:
