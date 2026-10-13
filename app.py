@@ -3,6 +3,8 @@ import requests
 import pypandoc
 import tempfile
 import os
+import re
+import pandas as pd
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -26,6 +28,60 @@ def init_supabase():
 supabase = init_supabase()
 
 st.title("SnapTex - Mathematical OCR & Export")
+
+
+def parse_markdown_to_blocks(markdown_text: str) -> list:
+    """Parses raw Markdown content into visual blocks (text blocks vs. table blocks)."""
+    blocks = []
+    lines = markdown_text.split("\n")
+    current_text = []
+    table_lines = []
+    in_table = False
+
+    for line in lines:
+        if line.strip().startswith("|") and line.strip().endswith("|"):
+            if current_text:
+                blocks.append({"type": "text", "content": "\n".join(current_text)})
+                current_text = []
+            in_table = True
+            table_lines.append(line)
+        else:
+            if in_table:
+                blocks.append({"type": "table", "content": "\n".join(table_lines)})
+                table_lines = []
+                in_table = False
+            current_text.append(line)
+
+    if current_text:
+        blocks.append({"type": "text", "content": "\n".join(current_text)})
+    if table_lines:
+        blocks.append({"type": "table", "content": "\n".join(table_lines)})
+
+    return blocks
+
+
+def markdown_table_to_df(table_str: str) -> pd.DataFrame:
+    """Converts a raw Markdown table string into a Pandas DataFrame for GUI editing."""
+    lines = [line.strip().strip("|") for line in table_str.strip().split("\n") if line.strip()]
+    if len(lines) < 2:
+        return pd.DataFrame()
+
+    headers = [col.strip() for col in lines[0].split("|")]
+    data_rows = []
+    for line in lines[1:]:
+        if re.match(r"^[\s\:\|-]+$", line):
+            continue
+        row = [cell.strip() for cell in line.split("|")]
+        if len(row) < len(headers):
+            row.extend([""] * (len(headers) - len(row)))
+        data_rows.append(row[:len(headers)])
+
+    return pd.DataFrame(data_rows, columns=headers)
+
+
+def df_to_markdown_table(df: pd.DataFrame) -> str:
+    """Converts an edited Pandas DataFrame back into Markdown table format."""
+    return df.to_markdown(index=False)
 
 
 def apply_table_borders(docx_path: str):
@@ -61,6 +117,8 @@ if "user_email" not in st.session_state:
     st.session_state["user_email"] = None
 if "active_filename" not in st.session_state:
     st.session_state["active_filename"] = "SnapTex_Transcribed_Notes"
+if "edit_mode" not in st.session_state:
+    st.session_state["edit_mode"] = False
 
 # --- SIDEBAR: USER AUTHENTICATION ---
 st.sidebar.header("👤 Account")
@@ -121,7 +179,6 @@ if st.session_state["auth_token"]:
         if history_response.status_code == 200:
             history_data = history_response.json().get("history", [])
             if history_data:
-                # Store options mapped to item objects
                 doc_options = {
                     f"{item.get('filename', 'Doc')} ({item.get('created_at', '')[:10]})": item
                     for item in history_data
@@ -212,24 +269,62 @@ if uploaded_file is not None:
                 except Exception as e:
                     st.error(f"Failed to connect to backend: {str(e)}")
 
-# --- MAIN AREA: ACTIVE DOCUMENT & EXPORT ---
+# --- MAIN AREA: IN-APP VISUAL EDITOR & EXPORT ---
 if "latex_output" in st.session_state and st.session_state["latex_output"]:
     st.markdown("---")
-    st.subheader(f"Editing Document: {st.session_state['active_filename']}")
 
-    # Editable raw text area (edits automatically update the session state)
-    updated_text = st.text_area(
-        "LaTeX / Markdown Text",
-        value=st.session_state["latex_output"],
-        height=250,
-        key="active_doc_viewer"
-    )
-    st.session_state["latex_output"] = updated_text
+    col_title, col_btn = st.columns([3, 1])
+    col_title.subheader(f"Document: {st.session_state['active_filename']}")
 
-    # Rendered mathematical equations preview
-    st.subheader("Formatted Preview")
-    st.markdown(st.session_state["latex_output"])
+    if st.session_state["edit_mode"]:
+        if col_btn.button("👁️ View Preview", type="secondary"):
+            st.session_state["edit_mode"] = False
+            st.rerun()
+    else:
+        if col_btn.button("✏️ Visual Edit", type="primary"):
+            st.session_state["edit_mode"] = True
+            st.rerun()
 
+    # --- MODE 1: VISUAL EDIT MODE ---
+    if st.session_state["edit_mode"]:
+        st.info("Visual Edit Mode Active: Edit text blocks or table cells directly below.")
+
+        blocks = parse_markdown_to_blocks(st.session_state["latex_output"])
+        updated_blocks = []
+
+        for idx, block in enumerate(blocks):
+            if block["type"] == "text":
+                edited_text = st.text_area(
+                    f"Text Block #{idx + 1}",
+                    value=block["content"],
+                    height=150,
+                    key=f"block_text_{idx}"
+                )
+                updated_blocks.append(edited_text)
+
+            elif block["type"] == "table":
+                st.write(f"**Table Block #{idx + 1} (Interactive Grid Editor)**")
+                df = markdown_table_to_df(block["content"])
+
+                if not df.empty:
+                    edited_df = st.data_editor(
+                        df,
+                        num_rows="dynamic",
+                        key=f"block_table_{idx}",
+                        use_container_width=True
+                    )
+                    updated_blocks.append(df_to_markdown_table(edited_df))
+                else:
+                    updated_blocks.append(block["content"])
+
+        st.session_state["latex_output"] = "\n\n".join(updated_blocks)
+
+    # --- MODE 2: READ / PREVIEW MODE ---
+    else:
+        st.subheader("Formatted Preview")
+        st.markdown(st.session_state["latex_output"])
+
+    # --- EXPORT SECTION ---
     st.subheader("Export Options")
 
     try:
@@ -258,7 +353,7 @@ if "latex_output" in st.session_state and st.session_state["latex_output"]:
         download_filename = f"{st.session_state['active_filename']}.docx"
 
         st.download_button(
-            label=f"📄 Download Native Word Document ({download_filename})",
+            label=f"📄 Download Editable Word Document ({download_filename})",
             data=docx_bytes,
             file_name=download_filename,
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
