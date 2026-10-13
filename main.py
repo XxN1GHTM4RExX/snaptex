@@ -6,7 +6,7 @@ from supabase import create_client
 
 from ocr_engine import process_image_with_gemini
 from blur_detector import calculate_blur_score
-from database import save_transcription, fetch_recent_transcriptions
+from database import save_transcription, fetch_recent_transcriptions, get_supabase_client
 
 app = FastAPI(title="SnapTex API", version="1.0")
 
@@ -92,3 +92,18 @@ def get_history(authorization: str = Header(...)):
     auth_data = verify_token(authorization)
     token = auth_data["token"]
     return {"history": fetch_recent_transcriptions(access_token=token, limit=10)}
+
+
+@app.delete("/history/{transcription_id}")
+def delete_history_item(transcription_id: str, authorization: str = Header(...)):
+    """Deletes a specific transcription row belonging to the authenticated user."""
+    auth_data = verify_token(authorization)
+    token = auth_data["token"]
+
+    try:
+        supabase = get_supabase_client(access_token=token)
+        # RLS guarantees users can ONLY delete their own records
+        supabase.table("transcriptions").delete().eq("id", transcription_id).execute()
+        return {"status": "success", "message": "Record deleted successfully."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Deletion failed: {str(e)}")

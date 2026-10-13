@@ -12,8 +12,8 @@ from supabase import create_client
 BACKEND_URL = "https://snaptex.onrender.com"  # Update with your exact Render backend URL
 
 # Supabase Credentials for Direct Auth Client in Streamlit
-SUPABASE_URL = "https://vjlnjwlarhznomhxtcgd.supabase.co"  # Replace with your Supabase URL
-SUPABASE_KEY = "sb_publishable_vo0NHPSxsNswuWX0BA34ew_RmsOFfhP"  # Replace with your Supabase anon key
+SUPABASE_URL = "https://vjlnjwlarhznomhxtcgd.supabase.co"
+SUPABASE_KEY = "sb_publishable_vo0NHPSxsNswuWX0BA34ew_RmsOFfhP"
 
 st.set_page_config(page_title="SnapTex", page_icon="📐", layout="centered")
 
@@ -118,14 +118,31 @@ if st.session_state["auth_token"]:
         if history_response.status_code == 200:
             history_data = history_response.json().get("history", [])
             if history_data:
-                selected_doc = st.sidebar.selectbox(
-                    "Select a previous transcription:",
-                    options=history_data,
-                    format_func=lambda item: f"{item.get('filename', 'Doc')} ({item.get('created_at', '')[:10]})"
-                )
-                if st.sidebar.button("📖 Load Selected Document"):
+                # Store options mapped to item objects
+                doc_options = {
+                    f"{item.get('filename', 'Doc')} ({item.get('created_at', '')[:10]})": item
+                    for item in history_data
+                }
+
+                selected_label = st.sidebar.selectbox("Select a previous transcription:", list(doc_options.keys()))
+                selected_doc = doc_options[selected_label]
+
+                col1, col2 = st.sidebar.columns(2)
+
+                if col1.button("📖 Load"):
                     st.session_state["latex_output"] = selected_doc.get("markdown_content", "")
-                    st.sidebar.success("Loaded from your private database!")
+                    st.sidebar.success("Loaded!")
+                    st.rerun()
+
+                if col2.button("🗑️ Delete"):
+                    doc_id = selected_doc.get("id")
+                    del_res = requests.delete(f"{BACKEND_URL}/history/{doc_id}", headers=headers)
+                    if del_res.status_code == 200:
+                        st.sidebar.success("Deleted!")
+                        st.session_state["latex_output"] = None
+                        st.rerun()
+                    else:
+                        st.sidebar.error("Could not delete record.")
             else:
                 st.sidebar.info("No past transcriptions found.")
         else:
@@ -167,9 +184,6 @@ if uploaded_file is not None:
                         st.success("Extraction Complete & Saved to Your Private Account!")
                         st.info(f"Image Quality Score: {blur_score:.2f}")
 
-                        st.subheader("Extracted Output")
-                        st.text_area("LaTeX / Markdown Text", latex_content, height=300)
-
                         st.session_state["latex_output"] = latex_content
                     else:
                         st.error(f"Backend error: {response.status_code}\n{response.text}")
@@ -179,8 +193,20 @@ if uploaded_file is not None:
 # --- MAIN AREA: ACTIVE DOCUMENT & EXPORT ---
 if "latex_output" in st.session_state and st.session_state["latex_output"]:
     st.markdown("---")
-    st.subheader("Active Document")
-    st.text_area("LaTeX / Markdown Content", st.session_state["latex_output"], height=300, key="active_doc_viewer")
+    st.subheader("Active Document Editor")
+
+    # Editable raw text area
+    updated_text = st.text_area(
+        "LaTeX / Markdown Text",
+        value=st.session_state["latex_output"],
+        height=250,
+        key="active_doc_viewer"
+    )
+    st.session_state["latex_output"] = updated_text
+
+    # Rendered mathematical equations preview
+    st.subheader("Formatted Preview")
+    st.markdown(st.session_state["latex_output"])
 
     st.subheader("Export Options")
 
