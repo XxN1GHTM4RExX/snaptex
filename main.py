@@ -1,6 +1,8 @@
 import io
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+import os
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
+from supabase import create_client
 
 from ocr_engine import process_image_with_gemini
 from blur_detector import calculate_blur_score
@@ -16,6 +18,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+
+def verify_token(authorization: str = Header(...)):
+    """Extracts and verifies the user JWT token from the Authorization header."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header.")
+
+    token = authorization.split("Bearer ")[1]
+
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        user_response = supabase.auth.get_user(token)
+        if not user_response or not user_response.user:
+            raise HTTPException(status_code=401, detail="Invalid token or user session expired.")
+        return {"token": token, "user_id": user_response.user.id}
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Authentication error: {str(e)}")
+
 
 @app.get("/")
 def read_root():
@@ -25,9 +47,14 @@ def read_root():
 @app.post("/process-document")
 async def process_document(
     file: UploadFile = File(...),
-    aggressive_whitening: str = Form("false")
+    aggressive_whitening: str = Form("false"),
+    authorization: str = Header(...)
 ):
     try:
+        auth_data = verify_token(authorization)
+        token = auth_data["token"]
+        user_id = auth_data["user_id"]
+
         contents = await file.read()
         blur_score = calculate_blur_score(contents)
 
@@ -37,12 +64,14 @@ async def process_document(
         ocr_result = process_image_with_gemini(contents, aggressive_whitening=is_whitening_enabled)
         latex_text = ocr_result.get("latex", "")
 
-        # Save record to Supabase (gracefully returns even if DB environment keys aren't configured yet)
+        # Save record to Supabase bound to the authenticated user ID
         save_transcription(
             filename=file.filename,
             markdown_content=latex_text,
             blur_score=blur_score,
-            whitening_enabled=is_whitening_enabled
+            whitening_enabled=is_whitening_enabled,
+            user_id=user_id,
+            access_token=token
         )
 
         return {
@@ -51,11 +80,15 @@ async def process_document(
             "latex": latex_text,
             "text": ocr_result.get("text", "")
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 
 @app.get("/history")
-def get_history():
-    """Returns the 10 most recent transcriptions from Supabase."""
-    return {"history": fetch_recent_transcriptions(limit=10)}
+def get_history(authorization: str = Header(...)):
+    """Returns the 10 most recent transcriptions for the authenticated user."""
+    auth_data = verify_token(authorization)
+    token = auth_data["token"]
+    return {"history": fetch_recent_transcriptions(access_token=token, limit=10)}
