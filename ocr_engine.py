@@ -16,10 +16,10 @@ from google.genai.errors import APIError
 
 # Updated Model Pool using official, stable Gemini endpoints
 # Updated Model Pool with official Gemini 3.8 endpoints
+# Updated Model Pool in backend/ocr_engine.py
 MODEL_POOL = [
     "gemini-3.8-flash",
-    "gemini-3.5-flash",
-    "gemini-2.5-flash"
+    "gemini-3.8-pro"
 ]
 
 
