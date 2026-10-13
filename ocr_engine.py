@@ -14,11 +14,12 @@ from PIL import Image
 from google import genai
 from google.genai.errors import APIError
 
-# Model pool with active model identifiers for fallback rotation
+# Updated Model Pool using official, stable Gemini endpoints
 MODEL_POOL = [
     "gemini-2.5-flash",
-    "gemini-3.5-flash-lite",
+    "gemini-2.0-flash",
     "gemini-1.5-flash",
+    "gemini-1.5-pro"
 ]
 
 
