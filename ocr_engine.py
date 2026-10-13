@@ -53,8 +53,8 @@ def generate_with_model_fallback(client: genai.Client, contents: list) -> str:
 def crop_and_clean_diagram(image: Image.Image, coords: list, aggressive_whitening: bool = False) -> str:
     """Crops diagrams.
 
-    If aggressive_whitening is True, forces background to pure white for exam line art.
-    If False, uses soft CLAHE contrast enhancement to preserve photo detail.
+    If aggressive_whitening is True, flattens background noise to pure white for exam line art.
+    If False, uses soft CLAHE contrast enhancement to preserve photographic detail.
     """
     width, height = image.size
     ymin, xmin, ymax, xmax = coords
@@ -74,14 +74,14 @@ def crop_and_clean_diagram(image: Image.Image, coords: list, aggressive_whitenin
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
 
     if aggressive_whitening:
-        # Mode A: Binary background whitening for line art / exam diagrams
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 30))
+        # Mode A: Morphological Division + Truncated Thresholding for smooth line drawings
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
         bg = cv2.morphologyEx(gray, cv2.MORPH_DILATE, kernel)
         norm = cv2.divide(gray, bg, scale=255)
 
-        # Force light background pixels directly to pure white (255)
-        _, binary_mask = cv2.threshold(norm, 190, 255, cv2.THRESH_BINARY)
-        final_img = cv2.normalize(binary_mask, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
+        # Truncate high background intensities while retaining smooth grayscale stroke anti-aliasing
+        _, white_bg = cv2.threshold(norm, 205, 255, cv2.THRESH_TRUNC)
+        final_img = cv2.normalize(white_bg, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
     else:
         # Mode B: Soft CLAHE contrast balance for complex photos / book scans
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 40))
