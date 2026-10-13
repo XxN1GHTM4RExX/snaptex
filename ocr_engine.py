@@ -51,13 +51,13 @@ def generate_with_model_fallback(client: genai.Client, contents: list) -> str:
 
 
 def crop_and_clean_diagram(image: Image.Image, coords: list) -> str:
-    """Crops printed schematics/sketches, removes notebook lines and page shadows,
-    forces the paper background to pure white, and returns a base64 PNG string.
+    """Crops diagrams, removes background shadows, and enhances contrast
+
+    without degrading detailed photos or line art.
     """
     width, height = image.size
     ymin, xmin, ymax, xmax = coords
 
-    # 1. Add 5% safety margin padding around bounding coordinates
     pad_w = int((xmax - xmin) * 0.05)
     pad_h = int((ymax - ymin) * 0.05)
 
@@ -69,21 +69,19 @@ def crop_and_clean_diagram(image: Image.Image, coords: list) -> str:
     cropped = image.crop((left, top, right, bottom))
     img_np = np.array(cropped)
 
-    # 2. Convert to grayscale
+    # 1. Convert to Grayscale
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
 
-    # 3. Morphological background illumination normalization (strips page shadows/gradients)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 30))
+    # 2. Estimate background lighting to remove uneven page shadows soft-handed
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 40))
     bg = cv2.morphologyEx(gray, cv2.MORPH_DILATE, kernel)
     norm = cv2.divide(gray, bg, scale=255)
 
-    # 4. White-level thresholding: force all light background/paper lines to pure white (255)
-    _, white_bg = cv2.threshold(norm, 205, 255, cv2.THRESH_TRUNC)
+    # 3. Apply gentle CLAHE contrast enhancement without truncating tones
+    clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
+    enhanced = clahe.apply(norm)
 
-    # 5. Stretch remaining ink stroke intensity across the full 0-255 spectrum
-    final_img = cv2.normalize(white_bg, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
-
-    cleaned_image = Image.fromarray(final_img)
+    cleaned_image = Image.fromarray(enhanced)
     buffer = io.BytesIO()
     cleaned_image.save(buffer, format="PNG")
     return f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode('utf-8')}"
