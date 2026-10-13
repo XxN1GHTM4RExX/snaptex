@@ -15,9 +15,11 @@ from google import genai
 from google.genai.errors import APIError
 
 # Updated Model Pool using official, stable Gemini endpoints
+# Updated Model Pool with official Gemini 3.8 endpoints
 MODEL_POOL = [
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash",
+    "gemini-2.5-flash"
 ]
 
 
