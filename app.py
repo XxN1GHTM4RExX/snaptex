@@ -3,6 +3,9 @@ import requests
 import pypandoc
 import tempfile
 import os
+from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
 # Backend Render API URL
 BACKEND_URL = "https://snaptex.onrender.com"  # Update with your exact Render backend URL
@@ -10,6 +13,34 @@ BACKEND_URL = "https://snaptex.onrender.com"  # Update with your exact Render ba
 st.set_page_config(page_title="SnapTex", page_icon="📐", layout="centered")
 
 st.title("SnapTex - Mathematical OCR & Export")
+
+
+def apply_table_borders(docx_path: str):
+    """Parses the generated docx file and forces explicit XML table grid borders
+
+    on every table element.
+    """
+    doc = Document(docx_path)
+
+    for table in doc.tables:
+        tblPr = table._tbl.tblPr
+        tblBorders = tblPr.find(qn('w:tblBorders'))
+        if tblBorders is not None:
+            tblPr.remove(tblBorders)
+
+        new_borders = OxmlElement('w:tblBorders')
+        for border_name in ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']:
+            border = OxmlElement(f'w:{border_name}')
+            border.set(qn('w:val'), 'single')
+            border.set(qn('w:sz'), '4')  # 0.5 pt line thickness
+            border.set(qn('w:space'), '0')
+            border.set(qn('w:color'), '000000')  # Solid black
+            new_borders.append(border)
+
+        tblPr.append(new_borders)
+
+    doc.save(docx_path)
+
 
 # Sidebar settings for document processing
 st.sidebar.header("Processing Settings")
@@ -78,6 +109,9 @@ if "latex_output" in st.session_state and st.session_state["latex_output"]:
             outputfile=tmp_path,
             extra_args=extra_args
         )
+
+        # Post-process docx to force visible table borders via Python XML injection
+        apply_table_borders(tmp_path)
 
         # Read the generated docx file as bytes
         with open(tmp_path, "rb") as f:
