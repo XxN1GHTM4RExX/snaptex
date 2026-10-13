@@ -1,4 +1,4 @@
-venv/
-.env
+*.env
+useful commands
 __pycache__/
-*.pyc
+.venv/
