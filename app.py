@@ -222,11 +222,15 @@ if st.session_state["auth_token"]:
                     else:
                         st.sidebar.error("Could not delete record.")
 
-                # Rename Section
-                new_title = st.sidebar.text_input("Rename selected document:", value=selected_doc.get("filename", ""))
+                # Rename Section - Uses dynamic key and forces st.rerun() on success
+                doc_id = selected_doc.get("id")
+                new_title = st.sidebar.text_input(
+                    "Rename selected document:",
+                    value=selected_doc.get("filename", ""),
+                    key=f"rename_input_{doc_id}"
+                )
                 if st.sidebar.button("✏️ Save New Name"):
                     if new_title.strip():
-                        doc_id = selected_doc.get("id")
                         rename_res = requests.patch(
                             f"{BACKEND_URL}/history/{doc_id}",
                             params={"new_filename": new_title.strip()},
