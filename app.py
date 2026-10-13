@@ -31,7 +31,9 @@ st.title("SnapTex - Mathematical OCR & Export")
 
 
 def parse_markdown_to_blocks(markdown_text: str) -> list:
-    """Parses raw Markdown content into visual blocks, skipping empty lines and whitespace."""
+    """Parses raw Markdown content into visual blocks. Separates base64 image strings
+    out of text areas into visual image blocks.
+    """
     blocks = []
     lines = markdown_text.split("\n")
     current_text = []
@@ -40,6 +42,25 @@ def parse_markdown_to_blocks(markdown_text: str) -> list:
 
     for line in lines:
         stripped = line.strip()
+
+        # Check for Base64 image Markdown tags
+        img_match = re.search(r'!\[\]\((data:image\/png;base64,[^\)]+)\)', line)
+        if img_match:
+            if current_text:
+                text_content = "\n".join(current_text).strip()
+                if text_content:
+                    blocks.append({"type": "text", "content": text_content})
+                current_text = []
+            if table_lines:
+                table_content = "\n".join(table_lines).strip()
+                if table_content:
+                    blocks.append({"type": "table", "content": table_content})
+                table_lines = []
+                in_table = False
+
+            blocks.append({"type": "image", "content": img_match.group(1)})
+            continue
+
         if stripped.startswith("|") and stripped.endswith("|"):
             if current_text:
                 text_content = "\n".join(current_text).strip()
@@ -71,12 +92,27 @@ def parse_markdown_to_blocks(markdown_text: str) -> list:
 
 
 def markdown_table_to_df(table_str: str) -> pd.DataFrame:
-    """Converts a raw Markdown table string into a Pandas DataFrame for GUI editing."""
+    """Converts a raw Markdown table string into a Pandas DataFrame for GUI editing.
+    Ensures all column headers are unique to prevent StreamlitAPIException crashes.
+    """
     lines = [line.strip().strip("|") for line in table_str.strip().split("\n") if line.strip()]
     if len(lines) < 2:
         return pd.DataFrame()
 
-    headers = [col.strip() for col in lines[0].split("|")]
+    raw_headers = [col.strip() for col in lines[0].split("|")]
+
+    # Normalize empty or duplicate column headers
+    headers = []
+    seen = {}
+    for idx, h in enumerate(raw_headers):
+        col_name = h if h else f"Col {idx + 1}"
+        if col_name in seen:
+            seen[col_name] += 1
+            headers.append(f"{col_name}_{seen[col_name]}")
+        else:
+            seen[col_name] = 0
+            headers.append(col_name)
+
     data_rows = []
     for line in lines[1:]:
         if re.match(r"^[\s\:\|-]+$", line):
@@ -96,12 +132,11 @@ def df_to_markdown_table(df: pd.DataFrame) -> str:
 
 def apply_table_borders(docx_path: str):
     """Parses the generated docx file, forces explicit XML table grid borders,
-    and prevents rows from splitting across page boundaries (fixing duplicate row exports).
+    and prevents rows from splitting across page boundaries.
     """
     doc = Document(docx_path)
 
     for table in doc.tables:
-        # 1. Force explicit table borders
         tblPr = table._tbl.tblPr
         tblBorders = tblPr.find(qn('w:tblBorders'))
         if tblBorders is not None:
@@ -111,14 +146,13 @@ def apply_table_borders(docx_path: str):
         for border_name in ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']:
             border = OxmlElement(f'w:{border_name}')
             border.set(qn('w:val'), 'single')
-            border.set(qn('w:sz'), '4')  # 0.5 pt line thickness
+            border.set(qn('w:sz'), '4')
             border.set(qn('w:space'), '0')
-            border.set(qn('w:color'), '000000')  # Solid black
+            border.set(qn('w:color'), '000000')
             new_borders.append(border)
 
         tblPr.append(new_borders)
 
-        # 2. Prevent row splitting across page boundaries
         for row in table.rows:
             trPr = row._tr.get_or_add_trPr()
             cantSplit = OxmlElement('w:cantSplit')
@@ -209,6 +243,7 @@ if st.session_state["auth_token"]:
                 if col1.button("📖 Load"):
                     st.session_state["latex_output"] = selected_doc.get("markdown_content", "")
                     st.session_state["active_filename"] = selected_doc.get("filename", "SnapTex_Notes")
+                    st.session_state["uploaded_filename"] = None
                     st.sidebar.success("Loaded!")
                     st.rerun()
 
@@ -222,7 +257,7 @@ if st.session_state["auth_token"]:
                     else:
                         st.sidebar.error("Could not delete record.")
 
-                # Rename Section - Uses dynamic key and forces st.rerun() on success
+                # Rename Section
                 doc_id = selected_doc.get("id")
                 new_title = st.sidebar.text_input(
                     "Rename selected document:",
@@ -254,7 +289,13 @@ else:
 # --- MAIN AREA: UPLOAD & PROCESS ---
 uploaded_file = st.file_uploader("Upload an image containing mathematical notes...", type=["jpg", "jpeg", "png"])
 
+# Clear previous document output if a brand-new file is uploaded to avoid clashing
 if uploaded_file is not None:
+    current_uploaded_name = uploaded_file.name.rsplit('.', 1)[0]
+    if "uploaded_filename" not in st.session_state or st.session_state["uploaded_filename"] != current_uploaded_name:
+        st.session_state["uploaded_filename"] = current_uploaded_name
+        st.session_state["latex_output"] = None
+
     st.image(uploaded_file, caption="Uploaded Document", width="stretch")
 
     if st.button("Process Document", type="primary"):
@@ -284,7 +325,8 @@ if uploaded_file is not None:
                         st.info(f"Image Quality Score: {blur_score:.2f}")
 
                         st.session_state["latex_output"] = latex_content
-                        st.session_state["active_filename"] = uploaded_file.name.rsplit('.', 1)[0]
+                        st.session_state["active_filename"] = current_uploaded_name
+                        st.rerun()
                     else:
                         st.error(f"Backend error: {response.status_code}\n{response.text}")
                 except Exception as e:
@@ -332,11 +374,16 @@ if "latex_output" in st.session_state and st.session_state["latex_output"]:
                         df,
                         num_rows="dynamic",
                         key=f"block_table_{idx}",
-                        use_container_width=True
+                        width="stretch"
                     )
                     updated_blocks.append(df_to_markdown_table(edited_df))
                 else:
                     updated_blocks.append(block["content"])
+
+            elif block["type"] == "image":
+                st.write(f"**Diagram Block #{idx + 1}**")
+                st.image(block["content"], caption="Cropped Diagram Preview", width="stretch")
+                updated_blocks.append(f"\n\n![]({block['content']})\n\n")
 
         st.session_state["latex_output"] = "\n\n".join(updated_blocks)
 
