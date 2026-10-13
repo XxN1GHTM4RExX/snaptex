@@ -11,17 +11,31 @@ st.set_page_config(page_title="SnapTex", page_icon="📐", layout="centered")
 
 st.title("SnapTex - Mathematical OCR & Export")
 
+# Sidebar settings for document processing
+st.sidebar.header("Processing Settings")
+aggressive_whitening = st.sidebar.checkbox(
+    "Aggressive Diagram Whitening",
+    value=False,
+    help="Enable this for exam papers, worksheets, and line drawings to force backgrounds to pure white. Leave unchecked for continuous-tone photos or book scans."
+)
+
 uploaded_file = st.file_uploader("Upload an image containing mathematical notes...", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
-    # Updated width='stretch' to replace removed use_container_width
     st.image(uploaded_file, caption="Uploaded Document", width="stretch")
 
     if st.button("Process Document", type="primary"):
         with st.spinner("Processing OCR via Gemini Engine..."):
             try:
                 files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
-                response = requests.post(f"{BACKEND_URL}/process-document", files=files, timeout=60)
+                data_payload = {"aggressive_whitening": str(aggressive_whitening).lower()}
+
+                response = requests.post(
+                    f"{BACKEND_URL}/process-document",
+                    files=files,
+                    data=data_payload,
+                    timeout=60
+                )
 
                 if response.status_code == 200:
                     data = response.json()

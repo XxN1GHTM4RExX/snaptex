@@ -50,10 +50,11 @@ def generate_with_model_fallback(client: genai.Client, contents: list) -> str:
     raise Exception(f"All models in fallback pool failed. Last error: {str(last_exception)}")
 
 
-def crop_and_clean_diagram(image: Image.Image, coords: list) -> str:
-    """Crops diagrams, removes background shadows, and enhances contrast
+def crop_and_clean_diagram(image: Image.Image, coords: list, aggressive_whitening: bool = False) -> str:
+    """Crops diagrams.
 
-    without degrading detailed photos or line art.
+    If aggressive_whitening is True, forces backgrounds to pure white for exam line art.
+    If False, uses soft CLAHE contrast enhancement to preserve photo detail.
     """
     width, height = image.size
     ymin, xmin, ymax, xmax = coords
@@ -72,16 +73,22 @@ def crop_and_clean_diagram(image: Image.Image, coords: list) -> str:
     # 1. Convert to Grayscale
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
 
-    # 2. Estimate background lighting to remove uneven page shadows soft-handed
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 40))
-    bg = cv2.morphologyEx(gray, cv2.MORPH_DILATE, kernel)
-    norm = cv2.divide(gray, bg, scale=255)
+    if aggressive_whitening:
+        # Mode A: Aggressive background thresholding for line art / exam diagrams
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 30))
+        bg = cv2.morphologyEx(gray, cv2.MORPH_DILATE, kernel)
+        norm = cv2.divide(gray, bg, scale=255)
+        _, white_bg = cv2.threshold(norm, 205, 255, cv2.THRESH_TRUNC)
+        final_img = cv2.normalize(white_bg, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
+    else:
+        # Mode B: Soft CLAHE contrast balance for complex photos / book scans
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 40))
+        bg = cv2.morphologyEx(gray, cv2.MORPH_DILATE, kernel)
+        norm = cv2.divide(gray, bg, scale=255)
+        clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
+        final_img = clahe.apply(norm)
 
-    # 3. Apply gentle CLAHE contrast enhancement without truncating tones
-    clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
-    enhanced = clahe.apply(norm)
-
-    cleaned_image = Image.fromarray(enhanced)
+    cleaned_image = Image.fromarray(final_img)
     buffer = io.BytesIO()
     cleaned_image.save(buffer, format="PNG")
     return f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode('utf-8')}"
@@ -137,7 +144,7 @@ def render_matplotlib_code(code_str: str) -> str:
         sys.setrecursionlimit(orig_recursion)
 
 
-def process_image_with_gemini(image_bytes: bytes) -> dict:
+def process_image_with_gemini(image_bytes: bytes, aggressive_whitening: bool = False) -> dict:
     image = Image.open(io.BytesIO(image_bytes))
 
     prompt = (
@@ -169,7 +176,7 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
 
     for match in crop_matches:
         coords = [int(c) for c in match]
-        b64_img = crop_and_clean_diagram(image, coords)
+        b64_img = crop_and_clean_diagram(image, coords, aggressive_whitening=aggressive_whitening)
         tag_str = f"[CROP_DIAGRAM: {match[0]}, {match[1]}, {match[2]}, {match[3]}]"
         cleaned_latex = cleaned_latex.replace(tag_str, f"\n\n![]({b64_img})\n\n")
 
@@ -189,7 +196,7 @@ def process_image_with_gemini(image_bytes: bytes) -> dict:
                 bounds_match = re.search(r'#\s*BOUNDS:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)', code)
                 if bounds_match:
                     coords = [int(c) for c in bounds_match.groups()]
-                    b64_img = crop_and_clean_diagram(image, coords)
+                    b64_img = crop_and_clean_diagram(image, coords, aggressive_whitening=aggressive_whitening)
                     markdown_img = f"\n\n![]({b64_img})\n\n"
                 else:
                     markdown_img = ""
