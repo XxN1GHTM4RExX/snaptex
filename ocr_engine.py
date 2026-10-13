@@ -18,8 +18,6 @@ from google.genai.errors import APIError
 MODEL_POOL = [
     "gemini-2.5-flash",
     "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-1.5-pro"
 ]
 
 
