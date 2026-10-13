@@ -17,7 +17,6 @@ st.title("SnapTex - Mathematical OCR & Export")
 
 def apply_table_borders(docx_path: str):
     """Parses the generated docx file and forces explicit XML table grid borders
-
     on every table element.
     """
     doc = Document(docx_path)
@@ -50,6 +49,34 @@ aggressive_whitening = st.sidebar.checkbox(
     help="Enable this for exam papers, worksheets, and line drawings to force backgrounds to pure white. Leave unchecked for continuous-tone photos or book scans."
 )
 
+# Fetch Recent Transcriptions History from Supabase
+st.sidebar.markdown("---")
+st.sidebar.header("📚 Document History")
+
+if st.sidebar.button("🔄 Refresh History"):
+    st.rerun()
+
+try:
+    history_response = requests.get(f"{BACKEND_URL}/history", timeout=10)
+    if history_response.status_code == 200:
+        history_data = history_response.json().get("history", [])
+        if history_data:
+            selected_doc = st.sidebar.selectbox(
+                "Select a previous transcription:",
+                options=history_data,
+                format_func=lambda item: f"{item.get('filename', 'Doc')} ({item.get('created_at', '')[:10]})"
+            )
+            if st.sidebar.button("📖 Load Selected Document"):
+                st.session_state["latex_output"] = selected_doc.get("markdown_content", "")
+                st.sidebar.success("Loaded from database!")
+        else:
+            st.sidebar.info("No past transcriptions found.")
+    else:
+        st.sidebar.warning("Could not fetch document history.")
+except Exception as e:
+    st.sidebar.warning("Database offline or unreachable.")
+
+
 uploaded_file = st.file_uploader("Upload an image containing mathematical notes...", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
@@ -73,7 +100,7 @@ if uploaded_file is not None:
                     latex_content = data.get("latex", "")
                     blur_score = data.get("blur_score", 0.0)
 
-                    st.success("Extraction Complete!")
+                    st.success("Extraction Complete & Saved to Database!")
                     st.info(f"Image Quality Score: {blur_score:.2f}")
 
                     st.subheader("Extracted Output")
@@ -86,9 +113,12 @@ if uploaded_file is not None:
             except Exception as e:
                 st.error(f"Failed to connect to backend: {str(e)}")
 
-# Native Pandoc DOCX Export running locally on Streamlit Cloud
+# Display loaded or extracted transcription
 if "latex_output" in st.session_state and st.session_state["latex_output"]:
     st.markdown("---")
+    st.subheader("Active Document")
+    st.text_area("LaTeX / Markdown Content", st.session_state["latex_output"], height=300, key="active_doc_viewer")
+
     st.subheader("Export Options")
 
     try:
