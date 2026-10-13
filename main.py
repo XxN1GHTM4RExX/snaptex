@@ -6,7 +6,12 @@ from supabase import create_client
 
 from ocr_engine import process_image_with_gemini
 from blur_detector import calculate_blur_score
-from database import save_transcription, fetch_recent_transcriptions, get_supabase_client
+from database import (
+    save_transcription,
+    fetch_recent_transcriptions,
+    get_supabase_client,
+    update_transcription_filename
+)
 
 app = FastAPI(title="SnapTex API", version="1.0")
 
@@ -107,3 +112,26 @@ def delete_history_item(transcription_id: str, authorization: str = Header(...))
         return {"status": "success", "message": "Record deleted successfully."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Deletion failed: {str(e)}")
+
+
+@app.patch("/history/{transcription_id}")
+def rename_history_item(
+    transcription_id: str,
+    new_filename: str = Form(...),
+    authorization: str = Header(...)
+):
+    """Renames a specific transcription record belonging to the authenticated user."""
+    auth_data = verify_token(authorization)
+    token = auth_data["token"]
+
+    try:
+        updated_record = update_transcription_filename(
+            transcription_id=transcription_id,
+            new_filename=new_filename,
+            access_token=token
+        )
+        if not updated_record:
+            raise HTTPException(status_code=400, detail="Could not update record.")
+        return {"status": "success", "data": updated_record}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Rename failed: {str(e)}")

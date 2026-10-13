@@ -59,6 +59,8 @@ if "auth_token" not in st.session_state:
     st.session_state["auth_token"] = None
 if "user_email" not in st.session_state:
     st.session_state["user_email"] = None
+if "active_filename" not in st.session_state:
+    st.session_state["active_filename"] = "SnapTex_Transcribed_Notes"
 
 # --- SIDEBAR: USER AUTHENTICATION ---
 st.sidebar.header("👤 Account")
@@ -92,6 +94,7 @@ else:
         st.session_state["auth_token"] = None
         st.session_state["user_email"] = None
         st.session_state["latex_output"] = None
+        st.session_state["active_filename"] = "SnapTex_Transcribed_Notes"
         st.rerun()
 
 # --- SIDEBAR: PROCESSING SETTINGS ---
@@ -131,6 +134,7 @@ if st.session_state["auth_token"]:
 
                 if col1.button("📖 Load"):
                     st.session_state["latex_output"] = selected_doc.get("markdown_content", "")
+                    st.session_state["active_filename"] = selected_doc.get("filename", "SnapTex_Notes")
                     st.sidebar.success("Loaded!")
                     st.rerun()
 
@@ -143,6 +147,23 @@ if st.session_state["auth_token"]:
                         st.rerun()
                     else:
                         st.sidebar.error("Could not delete record.")
+
+                # Rename Section
+                new_title = st.sidebar.text_input("Rename selected document:", value=selected_doc.get("filename", ""))
+                if st.sidebar.button("✏️ Save New Name"):
+                    if new_title.strip():
+                        doc_id = selected_doc.get("id")
+                        rename_res = requests.patch(
+                            f"{BACKEND_URL}/history/{doc_id}",
+                            data={"new_filename": new_title.strip()},
+                            headers=headers
+                        )
+                        if rename_res.status_code == 200:
+                            st.sidebar.success("Renamed!")
+                            st.session_state["active_filename"] = new_title.strip()
+                            st.rerun()
+                        else:
+                            st.sidebar.error("Rename failed.")
             else:
                 st.sidebar.info("No past transcriptions found.")
         else:
@@ -185,6 +206,7 @@ if uploaded_file is not None:
                         st.info(f"Image Quality Score: {blur_score:.2f}")
 
                         st.session_state["latex_output"] = latex_content
+                        st.session_state["active_filename"] = uploaded_file.name.rsplit('.', 1)[0]
                     else:
                         st.error(f"Backend error: {response.status_code}\n{response.text}")
                 except Exception as e:
@@ -193,9 +215,9 @@ if uploaded_file is not None:
 # --- MAIN AREA: ACTIVE DOCUMENT & EXPORT ---
 if "latex_output" in st.session_state and st.session_state["latex_output"]:
     st.markdown("---")
-    st.subheader("Active Document Editor")
+    st.subheader(f"Editing Document: {st.session_state['active_filename']}")
 
-    # Editable raw text area
+    # Editable raw text area (edits automatically update the session state)
     updated_text = st.text_area(
         "LaTeX / Markdown Text",
         value=st.session_state["latex_output"],
@@ -233,10 +255,12 @@ if "latex_output" in st.session_state and st.session_state["latex_output"]:
 
         os.remove(tmp_path)
 
+        download_filename = f"{st.session_state['active_filename']}.docx"
+
         st.download_button(
-            label="📄 Download Native Word Document (.docx)",
+            label=f"📄 Download Native Word Document ({download_filename})",
             data=docx_bytes,
-            file_name="SnapTex_Transcribed_Notes.docx",
+            file_name=download_filename,
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             type="primary"
         )
