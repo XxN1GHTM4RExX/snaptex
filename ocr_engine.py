@@ -26,7 +26,7 @@ MODEL_POOL_GOOGLE = [
 
 
 def call_groq_ocr(api_key: str, contents: list) -> str:
-    """Fallback OCR handler using Groq Cloud's Llama/Qwen Vision endpoints."""
+    """Fallback OCR handler using Groq Cloud's Llama Vision endpoint."""
     image_obj, prompt_text = contents[0], contents[1]
 
     buffer = io.BytesIO()
@@ -39,7 +39,7 @@ def call_groq_ocr(api_key: str, contents: list) -> str:
     }
 
     payload = {
-        "model": "llama-3.2-11b-vision-preview",
+        "model": "llama-3.2-11b-vision-instruct",
         "messages": [
             {
                 "role": "user",
@@ -53,17 +53,19 @@ def call_groq_ocr(api_key: str, contents: list) -> str:
     }
 
     response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=60)
+    print(f"[Groq Debug Status]: {response.status_code} | Response: {response.text[:200]}")
+
     if response.status_code == 200:
         return response.json()["choices"][0]["message"]["content"]
     elif response.status_code == 429:
         provider_manager.groq_pool.mark_rate_limited(api_key, cooldown_seconds=60)
         raise Exception("Groq rate limit reached (429).")
     else:
-        raise Exception(f"Groq API error: {response.status_code} - {response.text}")
+        raise Exception(f"Groq API error {response.status_code}: {response.text}")
 
 
 def call_openrouter_ocr(api_key: str, contents: list) -> str:
-    """Fallback OCR handler using OpenRouter's free-tier vision endpoints."""
+    """Fallback OCR handler using OpenRouter's free vision endpoint."""
     image_obj, prompt_text = contents[0], contents[1]
 
     buffer = io.BytesIO()
@@ -91,13 +93,15 @@ def call_openrouter_ocr(api_key: str, contents: list) -> str:
     }
 
     response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=60)
+    print(f"[OpenRouter Debug Status]: {response.status_code} | Response: {response.text[:200]}")
+
     if response.status_code == 200:
         return response.json()["choices"][0]["message"]["content"]
     elif response.status_code == 429:
         provider_manager.openrouter_pool.mark_rate_limited(api_key, cooldown_seconds=60)
         raise Exception("OpenRouter rate limit reached (429).")
     else:
-        raise Exception(f"OpenRouter API error: {response.status_code} - {response.text}")
+        raise Exception(f"OpenRouter API error {response.status_code}: {response.text}")
 
 
 def generate_with_multi_provider_fallback(contents: list) -> str:
@@ -113,11 +117,13 @@ def generate_with_multi_provider_fallback(contents: list) -> str:
                 if response.text:
                     return response.text
             except APIError as e:
+                print(f"[Google Debug API Error]: Code {e.code} - {e.message}")
                 if e.code == 429 or "quota" in str(e).lower():
                     provider_manager.google_pool.mark_rate_limited(g_key, cooldown_seconds=60)
                     break
                 continue
-            except Exception:
+            except Exception as e:
+                print(f"[Google Debug Unexpected Error]: {e}")
                 continue
 
     # 2. Cascade to Groq Pool
