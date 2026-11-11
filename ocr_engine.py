@@ -8,17 +8,16 @@ import numpy as np
 import scipy
 import matplotlib
 
-matplotlib.use('Agg')  # Non-interactive backend for headless Render server
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from PIL import Image
+import requests
 from google import genai
 from google.genai.errors import APIError
 
-# Updated Model Pool using official, stable Gemini endpoints
-# Updated Model Pool with official Gemini 3.8 endpoints
-# Updated Model Pool in backend/ocr_engine.py
-# Optimal, zero-delay Flash model pool for backend/ocr_engine.py
-MODEL_POOL = [
+from key_manager import provider_manager
+
+MODEL_POOL_GOOGLE = [
     "gemini-1.5-flash-latest",
     "gemini-1.5-flash",
     "gemini-3.8-flash",
@@ -26,39 +25,123 @@ MODEL_POOL = [
 ]
 
 
-def generate_with_model_fallback(client: genai.Client, contents: list) -> str:
-    """Tries the primary model first, rotating through fallbacks if rate limits (429)
-    or API errors occur.
-    """
-    last_exception = None
+def call_groq_ocr(api_key: str, contents: list) -> str:
+    """Fallback OCR handler using Groq Cloud's Llama/Qwen Vision endpoints."""
+    image_obj, prompt_text = contents[0], contents[1]
 
-    for model_name in MODEL_POOL:
+    buffer = io.BytesIO()
+    image_obj.save(buffer, format="PNG")
+    b64_img = base64.b64encode(buffer.getvalue()).decode('utf-8')
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": "llama-3.2-11b-vision-preview",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt_text},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_img}"}}
+                ]
+            }
+        ],
+        "temperature": 0.1
+    }
+
+    response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=60)
+    if response.status_code == 200:
+        return response.json()["choices"][0]["message"]["content"]
+    elif response.status_code == 429:
+        provider_manager.groq_pool.mark_rate_limited(api_key, cooldown_seconds=60)
+        raise Exception("Groq rate limit reached (429).")
+    else:
+        raise Exception(f"Groq API error: {response.status_code} - {response.text}")
+
+
+def call_openrouter_ocr(api_key: str, contents: list) -> str:
+    """Fallback OCR handler using OpenRouter's free-tier vision endpoints."""
+    image_obj, prompt_text = contents[0], contents[1]
+
+    buffer = io.BytesIO()
+    image_obj.save(buffer, format="PNG")
+    b64_img = base64.b64encode(buffer.getvalue()).decode('utf-8')
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "HTTP-Referer": "https://snaptex.onrender.com",
+        "X-Title": "Snaptex OCR",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": "qwen/qwen-2.5-vl-72b-instruct:free",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt_text},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_img}"}}
+                ]
+            }
+        ]
+    }
+
+    response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=60)
+    if response.status_code == 200:
+        return response.json()["choices"][0]["message"]["content"]
+    elif response.status_code == 429:
+        provider_manager.openrouter_pool.mark_rate_limited(api_key, cooldown_seconds=60)
+        raise Exception("OpenRouter rate limit reached (429).")
+    else:
+        raise Exception(f"OpenRouter API error: {response.status_code} - {response.text}")
+
+
+def generate_with_multi_provider_fallback(contents: list) -> str:
+    """Tier 1: Google AI Studio -> Tier 2: Groq -> Tier 3: OpenRouter."""
+    # 1. Try Google Pool First
+    g_key = provider_manager.google_pool.get_key()
+    if g_key:
+        client = genai.Client(api_key=g_key)
+        for model_name in MODEL_POOL_GOOGLE:
+            try:
+                print(f"Attempting Google OCR with model: {model_name}")
+                response = client.models.generate_content(model=model_name, contents=contents)
+                if response.text:
+                    return response.text
+            except APIError as e:
+                if e.code == 429 or "quota" in str(e).lower():
+                    provider_manager.google_pool.mark_rate_limited(g_key, cooldown_seconds=60)
+                    break
+                continue
+            except Exception:
+                continue
+
+    # 2. Cascade to Groq Pool
+    groq_key = provider_manager.groq_pool.get_key()
+    if groq_key:
         try:
-            print(f"Attempting OCR with model: {model_name}")
-            response = client.models.generate_content(
-                model=model_name,
-                contents=contents
-            )
-            if response.text:
-                return response.text
-        except APIError as e:
-            print(f"Model {model_name} failed with API error: {e}. Rotating to next model...")
-            last_exception = e
-            continue
+            print("Cascading to Groq Vision API...")
+            return call_groq_ocr(groq_key, contents)
         except Exception as e:
-            print(f"Unexpected error on {model_name}: {e}. Rotating to next model...")
-            last_exception = e
-            continue
+            print(f"Groq failed: {e}")
 
-    raise Exception(f"All models in fallback pool failed. Last error: {str(last_exception)}")
+    # 3. Cascade to OpenRouter Free Pool
+    or_key = provider_manager.openrouter_pool.get_key()
+    if or_key:
+        try:
+            print("Cascading to OpenRouter Free Vision API...")
+            return call_openrouter_ocr(or_key, contents)
+        except Exception as e:
+            print(f"OpenRouter failed: {e}")
+
+    raise Exception("All configured free AI providers (Google, Groq, OpenRouter) are rate-limited or unavailable.")
 
 
 def crop_and_clean_diagram(image: Image.Image, coords: list, aggressive_whitening: bool = False) -> str:
-    """Crops diagrams.
-
-    If aggressive_whitening is True, flattens background noise to pure white for exam line art.
-    If False, uses soft CLAHE contrast enhancement to preserve photographic detail.
-    """
     width, height = image.size
     ymin, xmin, ymax, xmax = coords
 
@@ -73,20 +156,15 @@ def crop_and_clean_diagram(image: Image.Image, coords: list, aggressive_whitenin
     cropped = image.crop((left, top, right, bottom))
     img_np = np.array(cropped)
 
-    # 1. Convert to Grayscale
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
 
     if aggressive_whitening:
-        # Mode A: Morphological Division + Truncated Thresholding for smooth line drawings
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
         bg = cv2.morphologyEx(gray, cv2.MORPH_DILATE, kernel)
         norm = cv2.divide(gray, bg, scale=255)
-
-        # Truncate high background intensities while retaining smooth grayscale stroke anti-aliasing
         _, white_bg = cv2.threshold(norm, 205, 255, cv2.THRESH_TRUNC)
         final_img = cv2.normalize(white_bg, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
     else:
-        # Mode B: Soft CLAHE contrast balance for complex photos / book scans
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 40))
         bg = cv2.morphologyEx(gray, cv2.MORPH_DILATE, kernel)
         norm = cv2.divide(gray, bg, scale=255)
@@ -100,13 +178,9 @@ def crop_and_clean_diagram(image: Image.Image, coords: list, aggressive_whitenin
 
 
 def sanitize_code(code_str: str) -> str:
-    """Strips function definitions and unsafe constructs using AST parsing
-    to prevent recursive execution loops.
-    """
     cleaned = code_str.replace("```python", "").replace("```", "").strip()
     try:
         parsed = ast.parse(cleaned)
-        # Remove function/class definitions to block recursive calls
         filtered_body = [
             node for node in parsed.body
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
@@ -114,14 +188,10 @@ def sanitize_code(code_str: str) -> str:
         parsed.body = filtered_body
         return ast.unparse(parsed)
     except Exception:
-        # Fallback regex stripping if AST parsing fails
         return re.sub(r'def\s+\w+\s*\(.*?\):[\s\S]*?(?=\n\S|\Z)', '', cleaned)
 
 
 def render_matplotlib_code(code_str: str) -> str:
-    """Executes Matplotlib code cleanly in an isolated scope.
-    Returns base64 string on success, or None on error to trigger crop fallback.
-    """
     buffer = io.BytesIO()
     plt.close('all')
 
@@ -144,7 +214,7 @@ def render_matplotlib_code(code_str: str) -> str:
     except Exception as e:
         plt.close('all')
         print(f"Matplotlib execution failed: {e}. Falling back to image crop.")
-        return None  # Triggers crop fallback
+        return None
     finally:
         sys.setrecursionlimit(orig_recursion)
 
@@ -172,11 +242,9 @@ def process_image_with_gemini(image_bytes: bytes, aggressive_whitening: bool = F
         "      - Wrap each script inside its own ```python ... ``` block tag directly where that specific figure belongs in the text flow."
     )
 
-    client = genai.Client()
-    raw_text = generate_with_model_fallback(client, [image, prompt])
+    raw_text = generate_with_multi_provider_fallback([image, prompt])
     cleaned_latex = raw_text
 
-    # 1. Process Path A: Crop printed schematics
     crop_pattern = r'\[CROP_DIAGRAM:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]'
     crop_matches = re.findall(crop_pattern, cleaned_latex)
 
@@ -186,7 +254,6 @@ def process_image_with_gemini(image_bytes: bytes, aggressive_whitening: bool = F
         tag_str = f"[CROP_DIAGRAM: {match[0]}, {match[1]}, {match[2]}, {match[3]}]"
         cleaned_latex = cleaned_latex.replace(tag_str, f"\n\n![]({b64_img})\n\n")
 
-    # 2. Process Path B: Render Matplotlib code blocks with dynamic crop fallback
     python_block_pattern = r'```python\s*(.*?)\s*```'
     code_matches = re.findall(python_block_pattern, cleaned_latex, re.DOTALL)
 

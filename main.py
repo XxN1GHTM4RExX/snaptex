@@ -13,7 +13,7 @@ from database import (
     update_transcription_filename
 )
 
-app = FastAPI(title="SnapTex API", version="1.0")
+app = FastAPI(title="SnapTex API", version="1.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -46,7 +46,7 @@ def verify_token(authorization: str = Header(...)):
 
 @app.get("/")
 def read_root():
-    return {"message": "SnapTex API is online and healthy!"}
+    return {"message": "SnapTex API with API Key Rotation is online and healthy!"}
 
 
 @app.post("/process-document")
@@ -63,13 +63,11 @@ async def process_document(
         contents = await file.read()
         blur_score = calculate_blur_score(contents)
 
-        # Parse string payload from Streamlit form data into boolean
         is_whitening_enabled = aggressive_whitening.lower() in ["true", "1", "yes"]
 
         ocr_result = process_image_with_gemini(contents, aggressive_whitening=is_whitening_enabled)
         latex_text = ocr_result.get("latex", "")
 
-        # Save record to Supabase bound to the authenticated user ID
         save_transcription(
             filename=file.filename,
             markdown_content=latex_text,
@@ -107,7 +105,6 @@ def delete_history_item(transcription_id: str, authorization: str = Header(...))
 
     try:
         supabase = get_supabase_client(access_token=token)
-        # RLS guarantees users can ONLY delete their own records
         supabase.table("transcriptions").delete().eq("id", transcription_id).execute()
         return {"status": "success", "message": "Record deleted successfully."}
     except Exception as e:
