@@ -52,7 +52,8 @@ def call_groq_ocr(api_key: str, contents: list) -> str:
         "temperature": 0.1
     }
 
-    response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=60)
+    response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload,
+                             timeout=60)
     print(f"[Groq Debug Status]: {response.status_code} | Response: {response.text[:200]}")
 
     if response.status_code == 200:
@@ -106,25 +107,33 @@ def call_openrouter_ocr(api_key: str, contents: list) -> str:
 
 def generate_with_multi_provider_fallback(contents: list) -> str:
     """Tier 1: Google AI Studio -> Tier 2: Groq -> Tier 3: OpenRouter."""
+
     # 1. Try Google Pool First
     g_key = provider_manager.google_pool.get_key()
     if g_key:
-        client = genai.Client(api_key=g_key)
-        for model_name in MODEL_POOL_GOOGLE:
-            try:
-                print(f"Attempting Google OCR with model: {model_name}")
-                response = client.models.generate_content(model=model_name, contents=contents)
-                if response.text:
-                    return response.text
-            except APIError as e:
-                print(f"[Google Debug API Error]: Code {e.code} - {e.message}")
-                if e.code == 429 or "quota" in str(e).lower():
-                    provider_manager.google_pool.mark_rate_limited(g_key, cooldown_seconds=60)
-                    break
-                continue
-            except Exception as e:
-                print(f"[Google Debug Unexpected Error]: {e}")
-                continue
+        try:
+            client = genai.Client(api_key=g_key)
+            for model_name in MODEL_POOL_GOOGLE:
+                try:
+                    print(f"Attempting Google OCR with model: {model_name}")
+                    response = client.models.generate_content(model=model_name, contents=contents)
+                    if response.text:
+                        return response.text
+                except APIError as e:
+                    print(f"[Google API Error]: Code {e.code} - {e.message}")
+                    if e.code == 429 or "quota" in str(e).lower():
+                        provider_manager.google_pool.mark_rate_limited(g_key, cooldown_seconds=60)
+                        break
+                    continue
+                except Exception as e:
+                    print(f"[Google Model {model_name} Failed]: {e}")
+                    continue
+
+            # If all Google models failed for active key, set cooldown and trigger provider fallback
+            print("All Google models failed for active key. Cascading to next provider...")
+            provider_manager.google_pool.mark_rate_limited(g_key, cooldown_seconds=60)
+        except Exception as e:
+            print(f"Google Client setup failed: {e}")
 
     # 2. Cascade to Groq Pool
     groq_key = provider_manager.groq_pool.get_key()
