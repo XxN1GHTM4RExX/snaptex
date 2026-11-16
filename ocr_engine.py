@@ -18,10 +18,10 @@ from google.genai.errors import APIError
 from key_manager import provider_manager
 
 MODEL_POOL_GOOGLE = [
+    "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
     "gemini-flash-latest",
-    "gemini-3-flash-preview",
-    "gemini-3.1-flash-lite-preview",
-    "gemini-3.1-pro-preview"
+    "gemini-3-flash-preview"
 ]
 
 MODEL_POOL_GROQ = [
@@ -218,7 +218,7 @@ def generate_with_multi_provider_fallback(contents: list) -> str:
         if not g_key:
             break
         try:
-            client = genai.Client(api_key=g_key)
+            client = genai.Client(api_key=g_key, http_options={"timeout": 25000})
             key_rate_limited = False
             models_to_try = list(MODEL_POOL_GOOGLE)
             discovered_added = False
