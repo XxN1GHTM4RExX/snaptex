@@ -280,7 +280,7 @@ def generate_with_multi_provider_fallback(contents: list) -> str:
 
 # ==============================================================================
 # 4-TIER VISUAL PIPELINE:
-# 1. TikZ / CircuiTikZ (Kroki standalone PNG -> QuickLaTeX -> Crop fallback)
+# 1. TikZ (Kroki standalone PNG -> QuickLaTeX -> Crop fallback)
 # 2. Vtracer B&W Binary Vectorization (replaces Potrace in compiled Rust)
 # 3. Vtracer Multi-Color Vectorization
 # 4. OpenCV Background Whitening Crop
@@ -408,7 +408,7 @@ def _clean_tikz_snippet(raw_code: str) -> str:
 
 
 def _render_via_kroki(tikz_body: str) -> str:
-    """Primary TikZ/CircuiTikZ renderer via Kroki standalone LaTeX engine."""
+    """Primary TikZ renderer via Kroki standalone LaTeX engine."""
     resp = requests.post(
         "https://kroki.io/tikz/png",
         data=tikz_body.encode("utf-8"),
@@ -454,24 +454,39 @@ def _render_via_quicklatex(tikz_body: str) -> str:
 
 
 def render_tikz_diagram(raw_code: str) -> str:
-    """Tier 1: Compiles TikZ/CircuiTikZ via Kroki standalone PNG -> QuickLaTeX fallback."""
+    """Tier 1: Compiles TikZ via Kroki standalone PNG -> QuickLaTeX fallback with sanity size check."""
     tikz_body = _clean_tikz_snippet(raw_code)
     if not tikz_body:
         return None
 
+    def _is_valid_render(data_uri: str) -> bool:
+        if not data_uri:
+            return False
+        try:
+            b64_part = data_uri.split(",", 1)[1]
+            check_img = Image.open(io.BytesIO(base64.b64decode(b64_part)))
+            # Reject collapsed 40x40px LaTeX error renders where labels pile onto (0,0)
+            return check_img.width >= 90 and check_img.height >= 90
+        except Exception:
+            return False
+
     try:
         res = _render_via_kroki(tikz_body)
-        if res:
+        if _is_valid_render(res):
             print("[TikZ Renderer]: Compiled successfully via Kroki.")
             return res
+        elif res:
+            print("[TikZ Renderer]: Kroki output too small (collapsed), rejecting.")
     except Exception as e:
         print(f"[Kroki TikZ Error]: {e}")
 
     try:
         res = _render_via_quicklatex(tikz_body)
-        if res:
+        if _is_valid_render(res):
             print("[TikZ Renderer]: Compiled successfully via QuickLaTeX fallback.")
             return res
+        elif res:
+            print("[TikZ Renderer]: QuickLaTeX output collapsed to text-only, rejecting.")
     except Exception as e:
         print(f"[QuickLaTeX Error]: {e}")
 
@@ -491,8 +506,8 @@ def process_image_with_gemini(image_bytes: bytes, aggressive_whitening: bool = F
         "   a. MECHANICAL DIAGRAMS, FORCE VECTORS, CIRCUITS, & GEOMETRIC SCHEMATICS:\n"
         "      Output a standalone ```tikz ... ``` block directly where the diagram appears.\n"
         "      - First line inside the block MUST be: `% BOUNDS: ymin, xmin, ymax, xmax` (normalized 0-1000 coordinates for fallback).\n"
-        "      - Write ONLY the `\\begin{tikzpicture} ... \\end{tikzpicture}` or `\\begin{circuitikz} ... \\end{circuitikz}` environment (no `\\documentclass` or `\\begin{document}`).\n"
-        "      - Use explicit coordinates so components and labels are cleanly spaced.\n"
+        "      - ALWAYS use standard `\\begin{tikzpicture}[scale=1.2, thick] ... \\end{tikzpicture}` (NEVER use `circuitikz` or `\\documentclass`). Draw resistors as rectangles or zigzags and batteries as parallel long/short lines using standard TikZ `\\draw` commands.\n"
+        "      - Use explicit `(x,y)` coordinates spaced at least 1.5-2 units apart so wires, components, and labels never overlap.\n"
         "   b. HAND-DRAWN CURVES, STATISTICAL GRAPHS, & BLACK-AND-WHITE LINE SKETCHES:\n"
         "      Return exact bounding boxes using: [VECTOR_BW: ymin, xmin, ymax, xmax].\n"
         "   c. COLORED DIAGRAMS, MULTI-INK CHARTS, & COLORED FLOWCHARTS:\n"
@@ -504,7 +519,7 @@ def process_image_with_gemini(image_bytes: bytes, aggressive_whitening: bool = F
     raw_text = generate_with_multi_provider_fallback([image, prompt])
     cleaned_latex = raw_text
 
-    # 1. Process Tier 1: TikZ / CircuiTikZ blocks (Kroki -> QuickLaTeX -> OpenCV Crop fallback)
+    # 1. Process Tier 1: TikZ blocks (Kroki -> QuickLaTeX -> OpenCV Crop fallback)
     tikz_pattern = r'```(?:tikz|latex)\s*(.*?)\s*```'
     tikz_matches = re.findall(tikz_pattern, cleaned_latex, re.DOTALL)
 
