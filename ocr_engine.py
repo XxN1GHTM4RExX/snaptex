@@ -283,7 +283,7 @@ def generate_with_multi_provider_fallback(contents: list) -> str:
 
 # ==============================================================================
 # 4-TIER VISUAL PIPELINE:
-# 1. TikZ / CircuiTikZ (Kroki standalone LaTeX -> QuickLaTeX -> Crop fallback)
+# 1. TikZ / CircuiTikZ (Kroki standalone LaTeX -> QuickLaTeX -> Vtracer fallback)
 # 2. Vtracer B&W Binary Vectorization (replaces Potrace in compiled Rust)
 # 3. Vtracer Multi-Color Vectorization
 # 4. OpenCV Background Whitening Crop
@@ -409,14 +409,35 @@ def vectorize_diagram_vtracer(image: Image.Image, coords: list, color_mode: str 
 
 
 def _clean_tikz_snippet(raw_code: str) -> str:
-    """Strips markdown fences and comment lines to isolate the TikZ/CircuiTikZ body."""
+    """Isolates the TikZ/CircuiTikZ environment and converts common STEM Unicode symbols to safe LaTeX."""
     cleaned = re.sub(r'^[%#].*$', '', raw_code, flags=re.MULTILINE).strip()
     env_match = re.search(
         r'(\\begin\{(?:tikzpicture|circuitikz)\}[\s\S]*?\\end\{(?:tikzpicture|circuitikz)\})',
         cleaned
     )
     if env_match:
-        return env_match.group(1)
+        cleaned = env_match.group(1)
+
+    # Map common Unicode STEM/Greek symbols to standard LaTeX math commands so labels are preserved
+    unicode_map = {
+        "Ω": r"\Omega ", "ω": r"\omega ",
+        "α": r"\alpha ", "β": r"\beta ", "γ": r"\gamma ", "Γ": r"\Gamma ",
+        "δ": r"\delta ", "Δ": r"\Delta ", "ε": r"\epsilon ", "θ": r"\theta ",
+        "Θ": r"\Theta ", "λ": r"\lambda ", "Λ": r"\Lambda ", "µ": r"\mu ",
+        "μ": r"\mu ", "π": r"\pi ", "Π": r"\Pi ", "ρ": r"\rho ",
+        "σ": r"\sigma ", "Σ": r"\Sigma ", "τ": r"\tau ", "φ": r"\phi ",
+        "Φ": r"\Phi ", "ψ": r"\psi ", "Ψ": r"\Psi ",
+        "°": r"^\circ ", "±": r"\pm ", "×": r"\times ", "÷": r"\div ",
+        "≤": r"\leq ", "≥": r"\geq ", "≠": r"\neq ", "≈": r"\approx ",
+        "∞": r"\infty ", "√": r"\sqrt{}",
+        "–": "-", "—": "-", "−": "-", "\ufffd": ""
+    }
+    for char, latex_cmd in unicode_map.items():
+        cleaned = cleaned.replace(char, latex_cmd)
+
+    # Strip any remaining non-ASCII bytes and remove any dangling lone backslashes before whitespace
+    cleaned = cleaned.encode("ascii", "ignore").decode("ascii")
+    cleaned = re.sub(r'\\(?=\s|$)', '', cleaned)
     return cleaned
 
 
@@ -424,7 +445,8 @@ def _render_via_kroki(tikz_body: str) -> str:
     """Primary TikZ/CircuiTikZ renderer via Kroki full standalone LaTeX document."""
     standalone_doc = (
         "\\documentclass[tikz,border=6pt]{standalone}\n"
-        "\\usepackage{amsmath,amssymb}\n"
+        "\\usepackage[utf8]{inputenc}\n"
+        "\\usepackage{amsmath,amssymb,textcomp}\n"
         "\\usepackage{tikz}\n"
         "\\usepackage{circuitikz}\n"
         "\\usetikzlibrary{arrows.meta,patterns,angles,quotes,calc,positioning,decorations.pathmorphing,decorations.markings}\n"
@@ -526,12 +548,13 @@ def process_image_with_gemini(image_bytes: bytes, aggressive_whitening: bool = F
         "3. Format all tables using strict Markdown table syntax. Each table row MUST be on a single continuous line starting and ending with '|'. Always include the delimiter row (| --- | --- |).\n"
         "4. Transcribe key-value metadata lists, technical spec fields, and labeled pairs (e.g., Trade Name, Manufacturer, Type Set, Power Supply) into explicit 2-column Markdown tables (| Property | Value |) rather than stacked text.\n"
         "5. Classify EVERY visual figure, diagram, graph, or sketch into the best matching tier below:\n"
-        "   a. MECHANICAL DIAGRAMS, FORCE VECTORS, CIRCUITS, & GEOMETRIC SCHEMATICS:\n"
+        "   a. MECHANICAL DIAGRAMS, FORCE VECTORS, ELECTRICAL CIRCUITS, & GEOMETRIC SCHEMATICS:\n"
+        "      ALWAYS use this tier for ANY circuit diagram (resistors, batteries, voltage sources, capacitors, inductors, current arrows) or physics schematic—NEVER use VECTOR_BW or CROP_DIAGRAM for circuits.\n"
         "      Output a standalone ```tikz ... ``` block directly where the diagram appears.\n"
         "      - First line inside the block MUST be: `% BOUNDS: ymin, xmin, ymax, xmax` (normalized 0-1000 coordinates for fallback).\n"
         "      - Use standard `\\begin{circuitikz}[american] ... \\end{circuitikz}` for electrical circuits (using `to[R=$R_1$]`, `to[battery1, l=$E$]`, `to[C=$C$]`, `to[L=$L$]`, `i=$I$`, etc.) OR `\\begin{tikzpicture}[scale=1.2, thick, >=Stealth] ... \\end{tikzpicture}` (with `decorations.pathmorphing` `coil`/`zigzag` and `patterns` `north east lines`) for mechanics, springs, pulleys, and geometry.\n"
         "      - Write ONLY the environment block (no `\\documentclass` or `\\begin{document}`), and space nodes >= 2.5 units apart so labels never collide.\n"
-        "   b. HAND-DRAWN CURVES, STATISTICAL GRAPHS, & BLACK-AND-WHITE LINE SKETCHES:\n"
+        "   b. HAND-DRAWN CURVES, STATISTICAL GRAPHS, & BLACK-AND-WHITE LINE SKETCHES (NON-CIRCUIT):\n"
         "      Return exact bounding boxes using: [VECTOR_BW: ymin, xmin, ymax, xmax].\n"
         "   c. COLORED DIAGRAMS, MULTI-INK CHARTS, & COLORED FLOWCHARTS:\n"
         "      Return exact bounding boxes using: [VECTOR_COLOR: ymin, xmin, ymax, xmax].\n"
@@ -542,7 +565,7 @@ def process_image_with_gemini(image_bytes: bytes, aggressive_whitening: bool = F
     raw_text = generate_with_multi_provider_fallback([image, prompt])
     cleaned_latex = raw_text
 
-    # 1. Process Tier 1: TikZ / CircuiTikZ blocks (Kroki standalone -> QuickLaTeX -> OpenCV Crop fallback)
+    # 1. Process Tier 1: TikZ / CircuiTikZ blocks (Kroki standalone -> QuickLaTeX -> Vtracer B&W fallback)
     tikz_pattern = r'```(?:tikz|latex)\s*(.*?)\s*```'
     tikz_matches = re.findall(tikz_pattern, cleaned_latex, re.DOTALL)
 
@@ -557,8 +580,8 @@ def process_image_with_gemini(image_bytes: bytes, aggressive_whitening: bool = F
                 bounds_match = re.search(r'[%#]\s*BOUNDS:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)', code)
                 if bounds_match:
                     coords = [int(c) for c in bounds_match.groups()]
-                    b64_img = crop_and_clean_diagram(image, coords, aggressive_whitening=aggressive_whitening)
-                    replacement = f"\n\n![]({b64_img})\n\n"
+                    svg_uri = vectorize_diagram_vtracer(image, coords, color_mode="binary")
+                    replacement = f"\n\n![]({svg_uri})\n\n"
                 else:
                     replacement = ""
 

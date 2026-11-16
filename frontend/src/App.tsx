@@ -32,23 +32,43 @@ export default function App() {
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user ?? null)
-      if (session?.user) fetchHistory()
+      if (session?.access_token) fetchHistory(session.access_token)
     })
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null)
-      if (session?.user) fetchHistory()
+      if (session?.access_token) fetchHistory(session.access_token)
     })
 
     return () => subscription.unsubscribe()
   }, [])
 
-  const fetchHistory = async () => {
+  const getAuthToken = async (): Promise<string | null> => {
+    const { data: { session } } = await supabase.auth.getSession()
+    return session?.access_token ?? null
+  }
+
+  const fetchHistory = async (providedToken?: string) => {
     try {
-      const res = await fetch(`${API_URL}/history`)
+      const token = providedToken || await getAuthToken()
+      if (!token) return
+
+      const res = await fetch(`${API_URL}/history`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+
       if (res.ok) {
         const data = await res.json()
-        setDocuments(data.documents || data || [])
+        const rawList = data.history || data.documents || data || []
+        const formatted: DocumentItem[] = rawList.map((item: any) => ({
+          id: String(item.id),
+          title: item.filename || item.title || 'Untitled Document',
+          content: item.markdown_content || item.content || '',
+          created_at: item.created_at || new Date().toISOString(),
+        }))
+        setDocuments(formatted)
       }
     } catch (err) {
       console.error('Failed to load history:', err)
@@ -74,17 +94,26 @@ export default function App() {
     setIsProcessing(true)
     setUploadError(null)
 
-    const formData = new FormData()
-    formData.append('file', file)
-    formData.append('aggressive_whitening', String(aggressiveWhitening))
-
     try {
+      const token = await getAuthToken()
+      if (!token) throw new Error('Session expired. Please sign in again.')
+
+      const formData = new FormData()
+      formData.append('file', file)
+      formData.append('aggressive_whitening', String(aggressiveWhitening))
+
       const res = await fetch(`${API_URL}/process-document`, {
         method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
         body: formData,
       })
 
-      if (!res.ok) throw new Error(`Server error: ${res.statusText}`)
+      if (!res.ok) {
+        const errData = await res.json().catch(() => null)
+        throw new Error(errData?.detail || `Server error: ${res.statusText}`)
+      }
 
       const data = await res.json()
       const newDoc: DocumentItem = {
@@ -96,6 +125,7 @@ export default function App() {
 
       setDocuments([newDoc, ...documents])
       setCurrentDoc(newDoc)
+      fetchHistory(token)
     } catch (err: any) {
       console.error('OCR processing failed:', err)
       setUploadError(err.message || 'Failed to process document.')
@@ -114,7 +144,6 @@ export default function App() {
 
   const handleExportDocx = () => {
     if (!currentDoc) return
-    // Simple text/markdown blob export for instant download
     const blob = new Blob([currentDoc.content], { type: 'text/markdown;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -271,6 +300,7 @@ export default function App() {
       <main className="flex-1 p-8 overflow-y-auto">
         {currentDoc ? (
           <SnapTexEditor
+            key={currentDoc.id}
             initialContent={currentDoc.content}
             title={currentDoc.title}
             onTitleChange={newTitle => setCurrentDoc({ ...currentDoc, title: newTitle })}
