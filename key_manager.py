@@ -1,6 +1,6 @@
 import os
 import time
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 
 
 class APIKeyPool:
@@ -8,28 +8,28 @@ class APIKeyPool:
 
     def __init__(self, env_var_prefix: str):
         self.prefix = env_var_prefix
-        self.keys: List[Dict[str, any]] = []
+        self.keys: List[Dict[str, Any]] = []
         self.current_idx = 0
         self.reload_keys()
 
     def reload_keys(self):
-        """Loads single or numbered environment variable keys (e.g., GROQ_API_KEY_1, GROQ_API_KEY_2)."""
+        """Loads single or numbered environment variable keys (e.g., GROQ_API_KEY, GROQ_API_KEY_1, GROQ_API_KEY_2)."""
         self.keys = []
 
         # Check primary single key
         primary_key = os.getenv(self.prefix)
-        if primary_key:
-            self.keys.append({"key": primary_key, "cooldown_until": 0.0})
+        if primary_key and primary_key.strip():
+            self.keys.append({"key": primary_key.strip(), "cooldown_until": 0.0})
 
-        # Check numbered keys
-        index = 1
-        while True:
+        # Check numbered keys (starts at 1; also checks 0 just in case)
+        for index in range(0, 50):
             key_val = os.getenv(f"{self.prefix}_{index}")
-            if not key_val:
+            if key_val and key_val.strip():
+                cleaned = key_val.strip()
+                if cleaned not in [k["key"] for k in self.keys]:
+                    self.keys.append({"key": cleaned, "cooldown_until": 0.0})
+            elif index >= 1:
                 break
-            if key_val not in [k["key"] for k in self.keys]:
-                self.keys.append({"key": key_val, "cooldown_until": 0.0})
-            index += 1
 
     def get_key(self) -> Optional[str]:
         """Returns the next available API key not currently on cooldown, or None if all are exhausted."""
@@ -49,6 +49,13 @@ class APIKeyPool:
 
         return None
 
+    def available_count(self) -> int:
+        """Returns how many keys in this pool are currently off cooldown."""
+        if not self.keys:
+            self.reload_keys()
+        now = time.time()
+        return sum(1 for k in self.keys if k["cooldown_until"] <= now)
+
     def mark_rate_limited(self, key: str, cooldown_seconds: int = 60):
         """Puts a specific key on temporary cooldown after receiving a 429 or quota response."""
         for k in self.keys:
@@ -65,6 +72,12 @@ class MultiProviderManager:
         self.google_pool = APIKeyPool("GOOGLE_API_KEY")
         self.groq_pool = APIKeyPool("GROQ_API_KEY")
         self.openrouter_pool = APIKeyPool("OPENROUTER_API_KEY")
+
+    def reload_all(self):
+        """Ensures all provider pools reload environment variables if initialized before load_dotenv()."""
+        for pool in (self.google_pool, self.groq_pool, self.openrouter_pool):
+            if not pool.keys:
+                pool.reload_keys()
 
 
 # Instantiated global manager

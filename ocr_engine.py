@@ -18,60 +18,81 @@ from google.genai.errors import APIError
 from key_manager import provider_manager
 
 MODEL_POOL_GOOGLE = [
-    "gemini-1.5-flash-latest",
-    "gemini-1.5-flash",
-    "gemini-3.8-flash",
-    "gemini-2.5-flash"
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash"
+]
+
+MODEL_POOL_GROQ = [
+    "meta-llama/llama-4-scout-17b-16e-instruct"
+]
+
+MODEL_POOL_OPENROUTER = [
+    "qwen/qwen-2.5-vl-72b-instruct:free",
+    "google/gemma-3-27b-it:free"
 ]
 
 
-def call_groq_ocr(api_key: str, contents: list) -> str:
-    """Fallback OCR handler using Groq Cloud's Llama Vision endpoint."""
-    image_obj, prompt_text = contents[0], contents[1]
+def _encode_image_for_openai_compat(image_obj: Image.Image, max_dim: int = 1600) -> str:
+    """Resizes oversized images and encodes as JPEG base64 so Groq/OpenRouter don't reject large PNG payloads."""
+    img = image_obj.convert("RGB")
+    if max(img.size) > max_dim:
+        img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
 
     buffer = io.BytesIO()
-    image_obj.save(buffer, format="PNG")
-    b64_img = base64.b64encode(buffer.getvalue()).decode('utf-8')
+    img.save(buffer, format="JPEG", quality=85)
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+def call_groq_ocr(api_key: str, contents: list) -> str:
+    """Fallback OCR handler using Groq Cloud's Vision endpoint."""
+    image_obj, prompt_text = contents[0], contents[1]
+    b64_img = _encode_image_for_openai_compat(image_obj)
 
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
 
-    payload = {
-        "model": "llama-3.2-11b-vision-instruct",
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt_text},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_img}"}}
-                ]
-            }
-        ],
-        "temperature": 0.1
-    }
+    last_err = None
+    for model_name in MODEL_POOL_GROQ:
+        payload = {
+            "model": model_name,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt_text},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}}
+                    ]
+                }
+            ],
+            "temperature": 0.1
+        }
 
-    response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload,
-                             timeout=60)
-    print(f"[Groq Debug Status]: {response.status_code} | Response: {response.text[:200]}")
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=60
+        )
+        print(f"[Groq Debug Status ({model_name})]: {response.status_code} | Response: {response.text[:200]}")
 
-    if response.status_code == 200:
-        return response.json()["choices"][0]["message"]["content"]
-    elif response.status_code == 429:
-        provider_manager.groq_pool.mark_rate_limited(api_key, cooldown_seconds=60)
-        raise Exception("Groq rate limit reached (429).")
-    else:
-        raise Exception(f"Groq API error {response.status_code}: {response.text}")
+        if response.status_code == 200:
+            return response.json()["choices"][0]["message"]["content"]
+        elif response.status_code == 429:
+            provider_manager.groq_pool.mark_rate_limited(api_key, cooldown_seconds=60)
+            raise Exception("Groq rate limit reached (429).")
+        else:
+            last_err = f"Groq API error {response.status_code}: {response.text[:200]}"
+
+    raise Exception(last_err or "Groq call failed.")
 
 
 def call_openrouter_ocr(api_key: str, contents: list) -> str:
-    """Fallback OCR handler using OpenRouter's free vision endpoint."""
+    """Fallback OCR handler using OpenRouter's free vision endpoints."""
     image_obj, prompt_text = contents[0], contents[1]
-
-    buffer = io.BytesIO()
-    image_obj.save(buffer, format="PNG")
-    b64_img = base64.b64encode(buffer.getvalue()).decode('utf-8')
+    b64_img = _encode_image_for_openai_compat(image_obj)
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -80,80 +101,110 @@ def call_openrouter_ocr(api_key: str, contents: list) -> str:
         "Content-Type": "application/json"
     }
 
-    payload = {
-        "model": "qwen/qwen-2.5-vl-72b-instruct:free",
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt_text},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_img}"}}
-                ]
-            }
-        ]
-    }
+    last_err = None
+    for model_name in MODEL_POOL_OPENROUTER:
+        payload = {
+            "model": model_name,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt_text},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}}
+                    ]
+                }
+            ],
+            "temperature": 0.1
+        }
 
-    response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=60)
-    print(f"[OpenRouter Debug Status]: {response.status_code} | Response: {response.text[:200]}")
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=60
+        )
+        print(f"[OpenRouter Debug Status ({model_name})]: {response.status_code} | Response: {response.text[:200]}")
 
-    if response.status_code == 200:
-        return response.json()["choices"][0]["message"]["content"]
-    elif response.status_code == 429:
-        provider_manager.openrouter_pool.mark_rate_limited(api_key, cooldown_seconds=60)
-        raise Exception("OpenRouter rate limit reached (429).")
-    else:
-        raise Exception(f"OpenRouter API error {response.status_code}: {response.text}")
+        if response.status_code == 200:
+            return response.json()["choices"][0]["message"]["content"]
+        elif response.status_code == 429:
+            provider_manager.openrouter_pool.mark_rate_limited(api_key, cooldown_seconds=60)
+            raise Exception("OpenRouter rate limit reached (429).")
+        else:
+            last_err = f"OpenRouter API error {response.status_code}: {response.text[:200]}"
+
+    raise Exception(last_err or "OpenRouter call failed.")
 
 
 def generate_with_multi_provider_fallback(contents: list) -> str:
-    """Tier 1: Google AI Studio -> Tier 2: Groq -> Tier 3: OpenRouter."""
+    """Tier 1: All Google Keys -> Tier 2: All Groq Keys -> Tier 3: All OpenRouter Keys."""
+    provider_manager.reload_all()
+    errors = []
 
-    # 1. Try Google Pool First
-    g_key = provider_manager.google_pool.get_key()
-    if g_key:
+    print(
+        f"[Pool Status] Google: {provider_manager.google_pool.available_count()}/{len(provider_manager.google_pool.keys)} | "
+        f"Groq: {provider_manager.groq_pool.available_count()}/{len(provider_manager.groq_pool.keys)} | "
+        f"OpenRouter: {provider_manager.openrouter_pool.available_count()}/{len(provider_manager.openrouter_pool.keys)}"
+    )
+
+    # 1. Exhaust all available keys in Google Pool
+    for _ in range(len(provider_manager.google_pool.keys)):
+        g_key = provider_manager.google_pool.get_key()
+        if not g_key:
+            break
         try:
             client = genai.Client(api_key=g_key)
+            key_rate_limited = False
             for model_name in MODEL_POOL_GOOGLE:
                 try:
-                    print(f"Attempting Google OCR with model: {model_name}")
+                    print(f"Attempting Google OCR ({g_key[:8]}...) with model: {model_name}")
                     response = client.models.generate_content(model=model_name, contents=contents)
                     if response.text:
                         return response.text
                 except APIError as e:
                     print(f"[Google API Error]: Code {e.code} - {e.message}")
+                    errors.append(f"Google({model_name}): {e.code}")
                     if e.code == 429 or "quota" in str(e).lower():
                         provider_manager.google_pool.mark_rate_limited(g_key, cooldown_seconds=60)
+                        key_rate_limited = True
                         break
-                    continue
                 except Exception as e:
                     print(f"[Google Model {model_name} Failed]: {e}")
-                    continue
+                    errors.append(f"Google({model_name}): {e}")
 
-            # If all Google models failed for active key, set cooldown and trigger provider fallback
-            print("All Google models failed for active key. Cascading to next provider...")
-            provider_manager.google_pool.mark_rate_limited(g_key, cooldown_seconds=60)
+            if not key_rate_limited:
+                provider_manager.google_pool.mark_rate_limited(g_key, cooldown_seconds=60)
         except Exception as e:
             print(f"Google Client setup failed: {e}")
+            errors.append(f"GoogleClient: {e}")
 
-    # 2. Cascade to Groq Pool
-    groq_key = provider_manager.groq_pool.get_key()
-    if groq_key:
+    # 2. Exhaust all available keys in Groq Pool
+    for _ in range(len(provider_manager.groq_pool.keys)):
+        groq_key = provider_manager.groq_pool.get_key()
+        if not groq_key:
+            break
         try:
-            print("Cascading to Groq Vision API...")
+            print(f"Cascading to Groq Vision API ({groq_key[:8]}...)...")
             return call_groq_ocr(groq_key, contents)
         except Exception as e:
             print(f"Groq failed: {e}")
+            errors.append(f"Groq: {e}")
 
-    # 3. Cascade to OpenRouter Free Pool
-    or_key = provider_manager.openrouter_pool.get_key()
-    if or_key:
+    # 3. Exhaust all available keys in OpenRouter Free Pool
+    for _ in range(len(provider_manager.openrouter_pool.keys)):
+        or_key = provider_manager.openrouter_pool.get_key()
+        if not or_key:
+            break
         try:
-            print("Cascading to OpenRouter Free Vision API...")
+            print(f"Cascading to OpenRouter Free Vision API ({or_key[:8]}...)...")
             return call_openrouter_ocr(or_key, contents)
         except Exception as e:
             print(f"OpenRouter failed: {e}")
+            errors.append(f"OpenRouter: {e}")
 
-    raise Exception("All configured free AI providers (Google, Groq, OpenRouter) are rate-limited or unavailable.")
+    raise Exception(
+        f"All AI providers failed. Details: {' | '.join(errors) if errors else 'No API keys loaded in environment.'}"
+    )
 
 
 def crop_and_clean_diagram(image: Image.Image, coords: list, aggressive_whitening: bool = False) -> str:
