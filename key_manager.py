@@ -6,30 +6,32 @@ from typing import List, Dict, Optional, Any
 class APIKeyPool:
     """Manages a pool of API keys with round-robin selection and dynamic rate-limit cooldown tracking."""
 
-    def __init__(self, env_var_prefix: str):
-        self.prefix = env_var_prefix
+    def __init__(self, prefixes: List[str]):
+        self.prefixes = prefixes
         self.keys: List[Dict[str, Any]] = []
         self.current_idx = 0
         self.reload_keys()
 
     def reload_keys(self):
-        """Loads single or numbered environment variable keys (e.g., GROQ_API_KEY, GROQ_API_KEY_1, GROQ_API_KEY_2)."""
+        """Loads any matching environment variables by exact prefix or prefix + suffix (e.g., _1, _2, -1, -2)."""
         self.keys = []
+        seen_values = set()
 
-        # Check primary single key
-        primary_key = os.getenv(self.prefix)
-        if primary_key and primary_key.strip():
-            self.keys.append({"key": primary_key.strip(), "cooldown_until": 0.0})
+        for env_name, env_val in sorted(os.environ.items()):
+            if not env_val or not env_val.strip():
+                continue
 
-        # Check numbered keys (starts at 1; also checks 0 just in case)
-        for index in range(0, 50):
-            key_val = os.getenv(f"{self.prefix}_{index}")
-            if key_val and key_val.strip():
-                cleaned = key_val.strip()
-                if cleaned not in [k["key"] for k in self.keys]:
-                    self.keys.append({"key": cleaned, "cooldown_until": 0.0})
-            elif index >= 1:
-                break
+            for prefix in self.prefixes:
+                if (
+                    env_name == prefix
+                    or env_name.startswith(f"{prefix}_")
+                    or env_name.startswith(f"{prefix}-")
+                ):
+                    cleaned = env_val.strip()
+                    if cleaned not in seen_values:
+                        seen_values.add(cleaned)
+                        self.keys.append({"key": cleaned, "cooldown_until": 0.0})
+                    break
 
     def get_key(self) -> Optional[str]:
         """Returns the next available API key not currently on cooldown, or None if all are exhausted."""
@@ -61,7 +63,7 @@ class APIKeyPool:
         for k in self.keys:
             if k["key"] == key:
                 k["cooldown_until"] = time.time() + cooldown_seconds
-                print(f"[KeyManager] {self.prefix} Key ({key[:8]}...) placed on {cooldown_seconds}s cooldown.")
+                print(f"[KeyManager] {self.prefixes[0]} Key ({key[:8]}...) placed on {cooldown_seconds}s cooldown.")
                 break
 
 
@@ -69,9 +71,9 @@ class MultiProviderManager:
     """Cascades requests across Google AI Studio, Groq, and OpenRouter pools."""
 
     def __init__(self):
-        self.google_pool = APIKeyPool("GOOGLE_API_KEY")
-        self.groq_pool = APIKeyPool("GROQ_API_KEY")
-        self.openrouter_pool = APIKeyPool("OPENROUTER_API_KEY")
+        self.google_pool = APIKeyPool(["GEMINI_API_KEY", "GOOGLE_API_KEY"])
+        self.groq_pool = APIKeyPool(["GROQ_API_KEY", "snaptex-groq"])
+        self.openrouter_pool = APIKeyPool(["OPENROUTER_API_KEY", "snaptex-openrouter"])
 
     def reload_all(self):
         """Ensures all provider pools reload environment variables if initialized before load_dotenv()."""
