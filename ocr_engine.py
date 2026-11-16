@@ -4,7 +4,7 @@ import base64
 import urllib.parse
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageChops
 import requests
 import vtracer
 from google import genai
@@ -290,11 +290,21 @@ def generate_with_multi_provider_fallback(contents: list) -> str:
 # ==============================================================================
 
 def _flatten_to_white_png(raw_bytes: bytes, pad: int = 20) -> str:
-    """Composites any transparent PNG onto a solid white RGB canvas with padding."""
+    """Composites any transparent PNG onto a solid white RGB canvas, trims excess page margin, and adds clean padding."""
     raw_img = Image.open(io.BytesIO(raw_bytes)).convert("RGBA")
-    white_bg = Image.new("RGBA", (raw_img.width + pad * 2, raw_img.height + pad * 2), (255, 255, 255, 255))
-    white_bg.paste(raw_img, (pad, pad), raw_img)
-    final_rgb = white_bg.convert("RGB")
+    temp_bg = Image.new("RGBA", raw_img.size, (255, 255, 255, 255))
+    temp_bg.paste(raw_img, (0, 0), raw_img)
+    rgb_img = temp_bg.convert("RGB")
+
+    # Detect non-white ink bounding box and trim excess A4/page whitespace
+    white_ref = Image.new("RGB", rgb_img.size, (255, 255, 255))
+    diff = ImageChops.difference(rgb_img, white_ref)
+    bbox = diff.getbbox()
+    if bbox:
+        rgb_img = rgb_img.crop(bbox)
+
+    final_rgb = Image.new("RGB", (rgb_img.width + pad * 2, rgb_img.height + pad * 2), (255, 255, 255))
+    final_rgb.paste(rgb_img, (pad, pad))
 
     out_buf = io.BytesIO()
     final_rgb.save(out_buf, format="PNG")
