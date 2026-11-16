@@ -18,18 +18,23 @@ from google.genai.errors import APIError
 from key_manager import provider_manager
 
 MODEL_POOL_GOOGLE = [
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.0-flash"
+    "gemini-flash-latest",
+    "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite-preview",
+    "gemini-3.1-pro-preview"
 ]
 
 MODEL_POOL_GROQ = [
-    "meta-llama/llama-4-scout-17b-16e-instruct"
+    "meta-llama/llama-4-maverick-17b-128e-instruct",
+    "llama-3.2-90b-vision-preview",
+    "llama-3.2-11b-vision-preview"
 ]
 
 MODEL_POOL_OPENROUTER = [
-    "qwen/qwen-2.5-vl-72b-instruct:free",
-    "google/gemma-3-27b-it:free"
+    "openrouter/free",
+    "qwen/qwen3-vl-30b-a3b-instruct:free",
+    "qwen/qwen2.5-vl-72b-instruct:free",
+    "meta-llama/llama-4-scout:free"
 ]
 
 
@@ -44,6 +49,54 @@ def _encode_image_for_openai_compat(image_obj: Image.Image, max_dim: int = 1600)
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
+def _discover_google_models(client: genai.Client) -> list:
+    """Dynamically fetches live Gemini models supporting generateContent as a fallback if hardcoded slugs 404."""
+    discovered = []
+    try:
+        for m in client.models.list():
+            name = getattr(m, "name", "").replace("models/", "")
+            methods = getattr(m, "supported_actions", None) or getattr(m, "supported_generation_methods", []) or []
+            if "gemini" in name.lower() and "embedding" not in name.lower() and "tts" not in name.lower():
+                if not methods or "generateContent" in methods:
+                    discovered.append(name)
+    except Exception as e:
+        print(f"[Google Model Discovery Error]: {e}")
+    return discovered
+
+
+def _discover_groq_vision_models(api_key: str) -> list:
+    """Queries Groq /models endpoint for currently active vision/multimodal models."""
+    try:
+        resp = requests.get(
+            "https://api.groq.com/openai/v1/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=15
+        )
+        if resp.status_code == 200:
+            models = [m["id"] for m in resp.json().get("data", [])]
+            return [m for m in models if any(k in m.lower() for k in ("vision", "llama-4", "vl", "multimodal"))]
+    except Exception as e:
+        print(f"[Groq Model Discovery Error]: {e}")
+    return []
+
+
+def _discover_openrouter_free_vision_models() -> list:
+    """Queries OpenRouter /models endpoint for active :free models that accept image inputs."""
+    try:
+        resp = requests.get("https://openrouter.ai/api/v1/models", timeout=15)
+        if resp.status_code == 200:
+            free_vision = []
+            for m in resp.json().get("data", []):
+                mid = m.get("id", "")
+                modalities = m.get("architecture", {}).get("input_modalities", [])
+                if mid.endswith(":free") and "image" in modalities:
+                    free_vision.append(mid)
+            return free_vision[:6]
+    except Exception as e:
+        print(f"[OpenRouter Model Discovery Error]: {e}")
+    return []
+
+
 def call_groq_ocr(api_key: str, contents: list) -> str:
     """Fallback OCR handler using Groq Cloud's Vision endpoint."""
     image_obj, prompt_text = contents[0], contents[1]
@@ -54,8 +107,14 @@ def call_groq_ocr(api_key: str, contents: list) -> str:
         "Content-Type": "application/json"
     }
 
+    models_to_try = list(MODEL_POOL_GROQ)
+    discovered = _discover_groq_vision_models(api_key)
+    for m in discovered:
+        if m not in models_to_try:
+            models_to_try.append(m)
+
     last_err = None
-    for model_name in MODEL_POOL_GROQ:
+    for model_name in models_to_try:
         payload = {
             "model": model_name,
             "messages": [
@@ -84,7 +143,7 @@ def call_groq_ocr(api_key: str, contents: list) -> str:
             provider_manager.groq_pool.mark_rate_limited(api_key, cooldown_seconds=60)
             raise Exception("Groq rate limit reached (429).")
         else:
-            last_err = f"Groq API error {response.status_code}: {response.text[:200]}"
+            last_err = f"Groq({model_name}) {response.status_code}: {response.text[:160]}"
 
     raise Exception(last_err or "Groq call failed.")
 
@@ -101,8 +160,14 @@ def call_openrouter_ocr(api_key: str, contents: list) -> str:
         "Content-Type": "application/json"
     }
 
+    models_to_try = list(MODEL_POOL_OPENROUTER)
+    discovered = _discover_openrouter_free_vision_models()
+    for m in discovered:
+        if m not in models_to_try:
+            models_to_try.append(m)
+
     last_err = None
-    for model_name in MODEL_POOL_OPENROUTER:
+    for model_name in models_to_try:
         payload = {
             "model": model_name,
             "messages": [
@@ -131,7 +196,7 @@ def call_openrouter_ocr(api_key: str, contents: list) -> str:
             provider_manager.openrouter_pool.mark_rate_limited(api_key, cooldown_seconds=60)
             raise Exception("OpenRouter rate limit reached (429).")
         else:
-            last_err = f"OpenRouter API error {response.status_code}: {response.text[:200]}"
+            last_err = f"OpenRouter({model_name}) {response.status_code}: {response.text[:160]}"
 
     raise Exception(last_err or "OpenRouter call failed.")
 
@@ -155,7 +220,13 @@ def generate_with_multi_provider_fallback(contents: list) -> str:
         try:
             client = genai.Client(api_key=g_key)
             key_rate_limited = False
-            for model_name in MODEL_POOL_GOOGLE:
+            models_to_try = list(MODEL_POOL_GOOGLE)
+            discovered_added = False
+
+            idx = 0
+            while idx < len(models_to_try):
+                model_name = models_to_try[idx]
+                idx += 1
                 try:
                     print(f"Attempting Google OCR ({g_key[:8]}...) with model: {model_name}")
                     response = client.models.generate_content(model=model_name, contents=contents)
@@ -168,6 +239,11 @@ def generate_with_multi_provider_fallback(contents: list) -> str:
                         provider_manager.google_pool.mark_rate_limited(g_key, cooldown_seconds=60)
                         key_rate_limited = True
                         break
+                    if e.code == 404 and not discovered_added:
+                        discovered_added = True
+                        for dm in _discover_google_models(client):
+                            if dm not in models_to_try:
+                                models_to_try.append(dm)
                 except Exception as e:
                     print(f"[Google Model {model_name} Failed]: {e}")
                     errors.append(f"Google({model_name}): {e}")
