@@ -1,12 +1,12 @@
 fastapi
 uvicorn
 python-multipart
+requests
 google-genai
 opencv-python-headless
 numpy
 pillow
-scipy
-matplotlib
+vtracer
 pypandoc_binary
 python-docx>=1.1.0
 supabase>=2.0.0

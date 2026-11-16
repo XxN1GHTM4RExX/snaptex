@@ -1,17 +1,12 @@
 import io
 import re
-import sys
-import ast
 import base64
+import urllib.parse
 import cv2
 import numpy as np
-import scipy
-import matplotlib
-
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 from PIL import Image
 import requests
+import vtracer
 from google import genai
 from google.genai.errors import APIError
 
@@ -70,7 +65,7 @@ def _discover_groq_vision_models(api_key: str) -> list:
         resp = requests.get(
             "https://api.groq.com/openai/v1/models",
             headers={"Authorization": f"Bearer {api_key}"},
-            timeout=15
+            timeout=10
         )
         if resp.status_code == 200:
             models = [m["id"] for m in resp.json().get("data", [])]
@@ -83,7 +78,7 @@ def _discover_groq_vision_models(api_key: str) -> list:
 def _discover_openrouter_free_vision_models() -> list:
     """Queries OpenRouter /models endpoint for active :free models that accept image inputs."""
     try:
-        resp = requests.get("https://openrouter.ai/api/v1/models", timeout=15)
+        resp = requests.get("https://openrouter.ai/api/v1/models", timeout=10)
         if resp.status_code == 200:
             free_vision = []
             for m in resp.json().get("data", []):
@@ -133,7 +128,7 @@ def call_groq_ocr(api_key: str, contents: list) -> str:
             "https://api.groq.com/openai/v1/chat/completions",
             headers=headers,
             json=payload,
-            timeout=60
+            timeout=25
         )
         print(f"[Groq Debug Status ({model_name})]: {response.status_code} | Response: {response.text[:200]}")
 
@@ -186,7 +181,7 @@ def call_openrouter_ocr(api_key: str, contents: list) -> str:
             "https://openrouter.ai/api/v1/chat/completions",
             headers=headers,
             json=payload,
-            timeout=60
+            timeout=25
         )
         print(f"[OpenRouter Debug Status ({model_name})]: {response.status_code} | Response: {response.text[:200]}")
 
@@ -218,7 +213,7 @@ def generate_with_multi_provider_fallback(contents: list) -> str:
         if not g_key:
             break
         try:
-            client = genai.Client(api_key=g_key, http_options={"timeout": 25000})
+            client = genai.Client(api_key=g_key, http_options={"timeout": 30000})
             key_rate_limited = False
             models_to_try = list(MODEL_POOL_GOOGLE)
             discovered_added = False
@@ -283,21 +278,36 @@ def generate_with_multi_provider_fallback(contents: list) -> str:
     )
 
 
-def crop_and_clean_diagram(image: Image.Image, coords: list, aggressive_whitening: bool = False) -> str:
+# ==============================================================================
+# 4-TIER VISUAL PIPELINE:
+# 1. TikZ / CircuiTikZ (QuickLaTeX -> Kroki -> Crop fallback)
+# 2. Vtracer B&W Binary Vectorization (replaces Potrace in compiled Rust)
+# 3. Vtracer Multi-Color Vectorization
+# 4. OpenCV Background Whitening Crop
+# ==============================================================================
+
+def _crop_region(image: Image.Image, coords: list) -> Image.Image:
+    """Safely crops a normalized [0..1000] bounding box with 5% padding."""
     width, height = image.size
     ymin, xmin, ymax, xmax = coords
 
-    pad_w = int((xmax - xmin) * 0.05)
-    pad_h = int((ymax - ymin) * 0.05)
+    pad_w = int(((xmax - xmin) / 1000.0) * width * 0.05)
+    pad_h = int(((ymax - ymin) / 1000.0) * height * 0.05)
 
     left = max(0, int((xmin / 1000.0) * width) - pad_w)
     top = max(0, int((ymin / 1000.0) * height) - pad_h)
     right = min(width, int((xmax / 1000.0) * width) + pad_w)
     bottom = min(height, int((ymax / 1000.0) * height) + pad_h)
 
-    cropped = image.crop((left, top, right, bottom))
-    img_np = np.array(cropped)
+    if right <= left or bottom <= top:
+        return image
+    return image.crop((left, top, right, bottom))
 
+
+def crop_and_clean_diagram(image: Image.Image, coords: list, aggressive_whitening: bool = False) -> str:
+    """Tier 4: OpenCV background whitening & contrast enhancement for photos and dense figures."""
+    cropped = _crop_region(image, coords).convert("RGB")
+    img_np = np.array(cropped)
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
 
     if aggressive_whitening:
@@ -319,46 +329,146 @@ def crop_and_clean_diagram(image: Image.Image, coords: list, aggressive_whitenin
     return f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode('utf-8')}"
 
 
-def sanitize_code(code_str: str) -> str:
-    cleaned = code_str.replace("```python", "").replace("```", "").strip()
+def vectorize_diagram_vtracer(image: Image.Image, coords: list, color_mode: str = "binary") -> str:
+    """
+    Tier 2 & Tier 3: Vectorizes cropped diagrams into crisp SVGs using Vtracer.
+    - color_mode='binary': High-contrast B&W curve tracing (replaces Potrace).
+    - color_mode='color': Layered multi-color SVG tracing.
+    """
     try:
-        parsed = ast.parse(cleaned)
-        filtered_body = [
-            node for node in parsed.body
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-        ]
-        parsed.body = filtered_body
-        return ast.unparse(parsed)
-    except Exception:
-        return re.sub(r'def\s+\w+\s*\(.*?\):[\s\S]*?(?=\n\S|\Z)', '', cleaned)
+        cropped = _crop_region(image, coords).convert("RGB")
+        img_np = np.array(cropped)
 
+        if color_mode == "binary":
+            # Normalize uneven paper lighting & threshold into crisp ink on pure white
+            gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (35, 35))
+            bg = cv2.morphologyEx(gray, cv2.MORPH_DILATE, kernel)
+            norm = cv2.divide(gray, bg, scale=255)
+            binary = cv2.adaptiveThreshold(
+                norm, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 25, 12
+            )
+            prep_pil = Image.fromarray(binary).convert("RGBA")
+        else:
+            # Mild illumination normalization before multi-color vector tracing
+            lab = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB)
+            l, a, b = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
+            l = clahe.apply(l)
+            balanced = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2RGB)
+            prep_pil = Image.fromarray(balanced).convert("RGBA")
 
-def render_matplotlib_code(code_str: str) -> str:
-    buffer = io.BytesIO()
-    plt.close('all')
+        raw_pixels = list(prep_pil.getdata())
+        width, height = prep_pil.size
 
-    orig_recursion = sys.getrecursionlimit()
-    sanitized_script = sanitize_code(code_str)
+        svg_str = vtracer.convert_pixels_to_svg(
+            raw_pixels,
+            size=(width, height),
+            colormode=color_mode,
+            hierarchical="stacked",
+            mode="spline",
+            filter_speckle=4,
+            color_precision=6,
+            layer_difference=16,
+            corner_threshold=60,
+            length_threshold=4.0,
+            max_iterations=10,
+            splice_threshold=45,
+            path_precision=3
+        )
 
-    exec_globals = {
-        "plt": plt,
-        "np": np,
-        "scipy": scipy,
-        "matplotlib": matplotlib
-    }
-
-    try:
-        sys.setrecursionlimit(200)
-        exec(sanitized_script, exec_globals)
-        plt.savefig(buffer, format="png", bbox_inches='tight', facecolor='white', dpi=300)
-        plt.close('all')
-        return f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode('utf-8')}"
+        svg_b64 = base64.b64encode(svg_str.encode("utf-8")).decode("utf-8")
+        return f"data:image/svg+xml;base64,{svg_b64}"
     except Exception as e:
-        plt.close('all')
-        print(f"Matplotlib execution failed: {e}. Falling back to image crop.")
+        print(f"[Vtracer ({color_mode}) Error]: {e}. Falling back to OpenCV crop.")
+        return crop_and_clean_diagram(image, coords, aggressive_whitening=(color_mode == "binary"))
+
+
+def _clean_tikz_snippet(raw_code: str) -> str:
+    """Strips markdown fences and comment lines to isolate the TikZ/CircuiTikZ body."""
+    cleaned = re.sub(r'^#.*$', '', raw_code, flags=re.MULTILINE).strip()
+    # Extract \begin{tikzpicture}...\end{tikzpicture} or \begin{circuitikz}...\end{circuitikz} if wrapped in \documentclass
+    env_match = re.search(
+        r'(\\begin\{(?:tikzpicture|circuitikz)\}[\s\S]*?\\end\{(?:tikzpicture|circuitikz)\})',
+        cleaned
+    )
+    if env_match:
+        return env_match.group(1)
+    return cleaned
+
+
+def _render_via_quicklatex(tikz_body: str) -> str:
+    """Primary TikZ/CircuiTikZ renderer via QuickLaTeX API."""
+    preamble = (
+        "\\usepackage{amsmath,amssymb}\n"
+        "\\usepackage{tikz}\n"
+        "\\usepackage{circuitikz}\n"
+        "\\usetikzlibrary{arrows.meta,patterns,angles,quotes,calc,positioning}"
+    )
+    payload = (
+        f"formula={urllib.parse.quote(tikz_body)}"
+        f"&fsize=17px"
+        f"&fcolor=000000"
+        f"&mode=0"
+        f"&out=1"
+        f"&remhost=quicklatex.com"
+        f"&preamble={urllib.parse.quote(preamble)}"
+    )
+    resp = requests.post(
+        "https://quicklatex.com/latex3.f",
+        data=payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=10
+    )
+    if resp.status_code == 200:
+        lines = resp.text.strip().splitlines()
+        # QuickLaTeX returns status '0' on line 0 and '<image_url> <width> <height>' on line 1
+        if len(lines) >= 2 and lines[0].strip() == "0":
+            img_url = lines[1].split()[0]
+            img_resp = requests.get(img_url, timeout=10)
+            if img_resp.status_code == 200 and img_resp.content:
+                b64_png = base64.b64encode(img_resp.content).decode("utf-8")
+                return f"data:image/png;base64,{b64_png}"
+    return None
+
+
+def _render_via_kroki(tikz_body: str) -> str:
+    """Secondary fallback TikZ renderer via Kroki open-source diagram API."""
+    resp = requests.post(
+        "https://kroki.io/tikz/svg",
+        data=tikz_body.encode("utf-8"),
+        headers={"Content-Type": "text/plain"},
+        timeout=10
+    )
+    if resp.status_code == 200 and "<svg" in resp.text:
+        svg_b64 = base64.b64encode(resp.text.encode("utf-8")).decode("utf-8")
+        return f"data:image/svg+xml;base64,{svg_b64}"
+    return None
+
+
+def render_tikz_diagram(raw_code: str) -> str:
+    """Tier 1: Compiles TikZ/CircuiTikZ via QuickLaTeX -> Kroki fallback."""
+    tikz_body = _clean_tikz_snippet(raw_code)
+    if not tikz_body:
         return None
-    finally:
-        sys.setrecursionlimit(orig_recursion)
+
+    try:
+        res = _render_via_quicklatex(tikz_body)
+        if res:
+            print("[TikZ Renderer]: Compiled successfully via QuickLaTeX.")
+            return res
+    except Exception as e:
+        print(f"[QuickLaTeX Error]: {e}")
+
+    try:
+        res = _render_via_kroki(tikz_body)
+        if res:
+            print("[TikZ Renderer]: Compiled successfully via Kroki fallback.")
+            return res
+    except Exception as e:
+        print(f"[Kroki TikZ Error]: {e}")
+
+    return None
 
 
 def process_image_with_gemini(image_bytes: bytes, aggressive_whitening: bool = False) -> dict:
@@ -370,52 +480,68 @@ def process_image_with_gemini(image_bytes: bytes, aggressive_whitening: bool = F
         "2. Convert mathematical expressions into standard LaTeX syntax using $...$ for inline math and $$...$$ for display math.\n"
         "3. Format all tables using strict Markdown table syntax. Each table row MUST be on a single continuous line starting and ending with '|'. Always include the delimiter row (| --- | --- |).\n"
         "4. Transcribe key-value metadata lists, technical spec fields, and labeled pairs (e.g., Trade Name, Manufacturer, Type Set, Power Supply) into explicit 2-column Markdown tables (| Property | Value |) rather than stacked text.\n"
-        "5. For visual elements, classify them into one of two categories:\n"
-        "   a. PRINTED ILLUSTRATIONS / SCHEMATICS / PHOTOS:\n"
-        "      Return exact bounding boxes using: [CROP_DIAGRAM: ymin, xmin, ymax, xmax].\n"
-        "   b. HAND-DRAWN SKETCHES / GRAPHS / CURVES:\n"
-        "      Output a SEPARATE, standalone Python script for EACH individual graph or curve in the document.\n"
-        "      STRICT CODING RULES PER SCRIPT:\n"
-        "      - Write ONLY linear, procedural Matplotlib code for THAT SINGLE figure (fig, ax = plt.subplots(figsize=(6, 3))).\n"
-        "      - Do NOT combine multiple separate drawings into one giant script.\n"
-        "      - Write purely sequential code (plt.plot, plt.fill_between, plt.xticks, plt.text). Absolutely NO custom `def` functions, recursion, or loops.\n"
-        "      - Transcribe all x-axis values and region numbers (e.g., 34%, 13.5%, 2.35%, x-values) into `plt.xticks()` or `plt.text()`.\n"
-        "      - Always include bounding box coordinates in a comment at the top like `# BOUNDS: ymin, xmin, ymax, xmax` for fallback.\n"
-        "      - Wrap each script inside its own ```python ... ``` block tag directly where that specific figure belongs in the text flow."
+        "5. Classify EVERY visual figure, diagram, graph, or sketch into the best matching tier below:\n"
+        "   a. MECHANICAL DIAGRAMS, FORCE VECTORS, CIRCUITS, & GEOMETRIC SCHEMATICS:\n"
+        "      Output a standalone ```tikz ... ``` block directly where the diagram appears.\n"
+        "      - First line inside the block MUST be: `% BOUNDS: ymin, xmin, ymax, xmax` (normalized 0-1000 coordinates for fallback).\n"
+        "      - Write ONLY the `\\begin{tikzpicture} ... \\end{tikzpicture}` or `\\begin{circuitikz} ... \\end{circuitikz}` environment (no `\\documentclass` or `\\begin{document}`).\n"
+        "      - Keep coordinates clean, compact, and well-labeled.\n"
+        "   b. HAND-DRAWN CURVES, STATISTICAL GRAPHS, & BLACK-AND-WHITE LINE SKETCHES:\n"
+        "      Return exact bounding boxes using: [VECTOR_BW: ymin, xmin, ymax, xmax].\n"
+        "   c. COLORED DIAGRAMS, MULTI-INK CHARTS, & COLORED FLOWCHARTS:\n"
+        "      Return exact bounding boxes using: [VECTOR_COLOR: ymin, xmin, ymax, xmax].\n"
+        "   d. REAL-WORLD PHOTOS, TEXTBOOK SCREENSHOTS, & SHADED ILLUSTRATIONS:\n"
+        "      Return exact bounding boxes using: [CROP_DIAGRAM: ymin, xmin, ymax, xmax]."
     )
 
     raw_text = generate_with_multi_provider_fallback([image, prompt])
     cleaned_latex = raw_text
 
-    crop_pattern = r'\[CROP_DIAGRAM:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]'
-    crop_matches = re.findall(crop_pattern, cleaned_latex)
+    # 1. Process Tier 1: TikZ / CircuiTikZ blocks (QuickLaTeX -> Kroki -> OpenCV Crop fallback)
+    tikz_pattern = r'```(?:tikz|latex)\s*(.*?)\s*```'
+    tikz_matches = re.findall(tikz_pattern, cleaned_latex, re.DOTALL)
 
-    for match in crop_matches:
-        coords = [int(c) for c in match]
-        b64_img = crop_and_clean_diagram(image, coords, aggressive_whitening=aggressive_whitening)
-        tag_str = f"[CROP_DIAGRAM: {match[0]}, {match[1]}, {match[2]}, {match[3]}]"
-        cleaned_latex = cleaned_latex.replace(tag_str, f"\n\n![]({b64_img})\n\n")
+    for code in tikz_matches:
+        if "\\begin{tikzpicture}" in code or "\\begin{circuitikz}" in code:
+            rendered_uri = render_tikz_diagram(code)
+            raw_block_re = re.compile(r'```(?:tikz|latex)\s*' + re.escape(code) + r'\s*```', re.DOTALL)
 
-    python_block_pattern = r'```python\s*(.*?)\s*```'
-    code_matches = re.findall(python_block_pattern, cleaned_latex, re.DOTALL)
-
-    for code in code_matches:
-        if "plt." in code or "matplotlib" in code:
-            rendered_output = render_matplotlib_code(code)
-            raw_block = f"```python\n{code}\n```"
-
-            if rendered_output:
-                markdown_img = f"\n\n![]({rendered_output})\n\n"
+            if rendered_uri:
+                replacement = f"\n\n![]({rendered_uri})\n\n"
             else:
-                bounds_match = re.search(r'#\s*BOUNDS:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)', code)
+                bounds_match = re.search(r'[%#]\s*BOUNDS:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)', code)
                 if bounds_match:
                     coords = [int(c) for c in bounds_match.groups()]
                     b64_img = crop_and_clean_diagram(image, coords, aggressive_whitening=aggressive_whitening)
-                    markdown_img = f"\n\n![]({b64_img})\n\n"
+                    replacement = f"\n\n![]({b64_img})\n\n"
                 else:
-                    markdown_img = ""
+                    replacement = ""
 
-            cleaned_latex = cleaned_latex.replace(raw_block, markdown_img)
+            cleaned_latex = raw_block_re.sub(lambda _: replacement, cleaned_latex, count=1)
+
+    # 2. Process Tier 2: B&W Vector Tracing (Vtracer binary mode)
+    bw_pattern = r'\[VECTOR_BW:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]'
+    for match in re.findall(bw_pattern, cleaned_latex):
+        coords = [int(c) for c in match]
+        svg_uri = vectorize_diagram_vtracer(image, coords, color_mode="binary")
+        tag_re = re.compile(rf'\[VECTOR_BW:\s*{match[0]},\s*{match[1]},\s*{match[2]},\s*{match[3]}\]')
+        cleaned_latex = tag_re.sub(lambda _: f"\n\n![]({svg_uri})\n\n", cleaned_latex, count=1)
+
+    # 3. Process Tier 3: Color Vector Tracing (Vtracer color mode)
+    color_pattern = r'\[VECTOR_COLOR:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]'
+    for match in re.findall(color_pattern, cleaned_latex):
+        coords = [int(c) for c in match]
+        svg_uri = vectorize_diagram_vtracer(image, coords, color_mode="color")
+        tag_re = re.compile(rf'\[VECTOR_COLOR:\s*{match[0]},\s*{match[1]},\s*{match[2]},\s*{match[3]}\]')
+        cleaned_latex = tag_re.sub(lambda _: f"\n\n![]({svg_uri})\n\n", cleaned_latex, count=1)
+
+    # 4. Process Tier 4: OpenCV Whitening Crop
+    crop_pattern = r'\[CROP_DIAGRAM:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]'
+    for match in re.findall(crop_pattern, cleaned_latex):
+        coords = [int(c) for c in match]
+        b64_img = crop_and_clean_diagram(image, coords, aggressive_whitening=aggressive_whitening)
+        tag_re = re.compile(rf'\[CROP_DIAGRAM:\s*{match[0]},\s*{match[1]},\s*{match[2]},\s*{match[3]}\]')
+        cleaned_latex = tag_re.sub(lambda _: f"\n\n![]({b64_img})\n\n", cleaned_latex, count=1)
 
     return {
         "latex": cleaned_latex,
