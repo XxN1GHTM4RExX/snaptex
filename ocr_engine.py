@@ -15,8 +15,7 @@ from key_manager import provider_manager
 MODEL_POOL_GOOGLE = [
     "gemini-3.8-flash",
     "gemini-3.5-flash-lite",
-    "gemini-flash-latest",
-    "gemini-3-flash-preview"
+    "gemini-3.1-pro-preview"
 ]
 
 MODEL_POOL_GROQ = [
@@ -45,13 +44,17 @@ def _encode_image_for_openai_compat(image_obj: Image.Image, max_dim: int = 1600)
 
 
 def _discover_google_models(client: genai.Client) -> list:
-    """Dynamically fetches live Gemini models supporting generateContent as a fallback if hardcoded slugs 404."""
+    """Dynamically fetches live Gemini 3.x+ models supporting generateContent while skipping deprecated 2.x/image slugs."""
     discovered = []
     try:
         for m in client.models.list():
             name = getattr(m, "name", "").replace("models/", "")
             methods = getattr(m, "supported_actions", None) or getattr(m, "supported_generation_methods", []) or []
-            if "gemini" in name.lower() and "embedding" not in name.lower() and "tts" not in name.lower():
+            lower = name.lower()
+            if (
+                "gemini" in lower
+                and not any(skip in lower for skip in ("embedding", "tts", "image", "2.0", "2.5", "1.5"))
+            ):
                 if not methods or "generateContent" in methods:
                     discovered.append(name)
     except Exception as e:
@@ -280,7 +283,7 @@ def generate_with_multi_provider_fallback(contents: list) -> str:
 
 # ==============================================================================
 # 4-TIER VISUAL PIPELINE:
-# 1. TikZ (Kroki standalone PNG -> QuickLaTeX -> Crop fallback)
+# 1. TikZ / CircuiTikZ (Kroki standalone LaTeX -> QuickLaTeX -> Crop fallback)
 # 2. Vtracer B&W Binary Vectorization (replaces Potrace in compiled Rust)
 # 3. Vtracer Multi-Color Vectorization
 # 4. OpenCV Background Whitening Crop
@@ -396,7 +399,7 @@ def vectorize_diagram_vtracer(image: Image.Image, coords: list, color_mode: str 
 
 
 def _clean_tikz_snippet(raw_code: str) -> str:
-    """Strips markdown fences and comment lines to isolate the TikZ body."""
+    """Strips markdown fences and comment lines to isolate the TikZ/CircuiTikZ body."""
     cleaned = re.sub(r'^[%#].*$', '', raw_code, flags=re.MULTILINE).strip()
     env_match = re.search(
         r'(\\begin\{(?:tikzpicture|circuitikz)\}[\s\S]*?\\end\{(?:tikzpicture|circuitikz)\})',
@@ -408,19 +411,26 @@ def _clean_tikz_snippet(raw_code: str) -> str:
 
 
 def _render_via_kroki(tikz_body: str) -> str:
-    """Primary TikZ renderer via Kroki standalone LaTeX engine (supports standard TikZ libraries)."""
-    # Prepend standard TikZ libraries inside the snippet if not already declared
-    libs = "\\usetikzlibrary{arrows.meta,patterns,angles,quotes,calc,positioning,decorations.pathmorphing,decorations.markings}\n"
-    full_payload = libs + tikz_body if "\\usetikzlibrary" not in tikz_body else tikz_body
-
+    """Primary TikZ/CircuiTikZ renderer via Kroki full standalone LaTeX document."""
+    standalone_doc = (
+        "\\documentclass[tikz,border=6pt]{standalone}\n"
+        "\\usepackage{amsmath,amssymb}\n"
+        "\\usepackage{tikz}\n"
+        "\\usepackage{circuitikz}\n"
+        "\\usetikzlibrary{arrows.meta,patterns,angles,quotes,calc,positioning,decorations.pathmorphing,decorations.markings}\n"
+        "\\begin{document}\n"
+        f"{tikz_body}\n"
+        "\\end{document}"
+    )
     resp = requests.post(
         "https://kroki.io/tikz/png",
-        data=full_payload.encode("utf-8"),
+        data=standalone_doc.encode("utf-8"),
         headers={"Content-Type": "text/plain"},
-        timeout=12
+        timeout=15
     )
     if resp.status_code == 200 and resp.content:
         return _flatten_to_white_png(resp.content)
+    print(f"[Kroki TikZ Status {resp.status_code}]: {resp.text[:200]}")
     return None
 
 
@@ -429,7 +439,8 @@ def _render_via_quicklatex(tikz_body: str) -> str:
     preamble = (
         "\\usepackage{amsmath,amssymb}\n"
         "\\usepackage{tikz}\n"
-        "\\usetikzlibrary{arrows.meta,patterns,angles,quotes,calc,positioning,decorations.pathmorphing,decorations.markings}"
+        "\\usepackage{circuitikz}\n"
+        "\\usetikzlibrary{arrows.meta,patterns,angles,quotes,calc,positioning,decorations.pathmorphing}"
     )
     payload = (
         f"formula={urllib.parse.quote(tikz_body)}"
@@ -457,7 +468,7 @@ def _render_via_quicklatex(tikz_body: str) -> str:
 
 
 def render_tikz_diagram(raw_code: str) -> str:
-    """Tier 1: Compiles TikZ via Kroki standalone PNG -> QuickLaTeX fallback with sanity size check."""
+    """Tier 1: Compiles TikZ/CircuiTikZ via Kroki standalone LaTeX -> QuickLaTeX fallback."""
     tikz_body = _clean_tikz_snippet(raw_code)
     if not tikz_body:
         return None
@@ -475,7 +486,7 @@ def render_tikz_diagram(raw_code: str) -> str:
     try:
         res = _render_via_kroki(tikz_body)
         if _is_valid_render(res):
-            print("[TikZ Renderer]: Compiled successfully via Kroki.")
+            print("[TikZ Renderer]: Compiled successfully via Kroki standalone.")
             return res
         elif res:
             print("[TikZ Renderer]: Kroki output too small (collapsed), rejecting.")
@@ -508,9 +519,8 @@ def process_image_with_gemini(image_bytes: bytes, aggressive_whitening: bool = F
         "   a. MECHANICAL DIAGRAMS, FORCE VECTORS, CIRCUITS, & GEOMETRIC SCHEMATICS:\n"
         "      Output a standalone ```tikz ... ``` block directly where the diagram appears.\n"
         "      - First line inside the block MUST be: `% BOUNDS: ymin, xmin, ymax, xmax` (normalized 0-1000 coordinates for fallback).\n"
-        "      - ALWAYS use pure `\\begin{tikzpicture}[scale=1.3, thick, >=Stealth] ... \\end{tikzpicture}` (NEVER use `circuitikz` or `\\documentclass`).\n"
-        "      - Use TikZ `decorations.pathmorphing` (`decorate[decoration={zigzag, segment length=6pt, amplitude=2.5pt}]` for resistors, `coil` for springs/inductors) and `patterns` (`north east lines` for walls/grounds) so every physical/electrical element has its proper symbol—never a bare straight line.\n"
-        "      - Offset all labels cleanly (`left=10pt`, `right=8pt`, `above=6pt`, `below=6pt`) so text never collides with `+`/`-` signs or lines.\n"
+        "      - Use standard `\\begin{circuitikz}[american] ... \\end{circuitikz}` for electrical circuits (using `to[R=$R_1$]`, `to[battery1, l=$E$]`, `to[C=$C$]`, `to[L=$L$]`, `i=$I$`, etc.) OR `\\begin{tikzpicture}[scale=1.2, thick, >=Stealth] ... \\end{tikzpicture}` (with `decorations.pathmorphing` `coil`/`zigzag` and `patterns` `north east lines`) for mechanics, springs, pulleys, and geometry.\n"
+        "      - Write ONLY the environment block (no `\\documentclass` or `\\begin{document}`), and space nodes >= 2.5 units apart so labels never collide.\n"
         "   b. HAND-DRAWN CURVES, STATISTICAL GRAPHS, & BLACK-AND-WHITE LINE SKETCHES:\n"
         "      Return exact bounding boxes using: [VECTOR_BW: ymin, xmin, ymax, xmax].\n"
         "   c. COLORED DIAGRAMS, MULTI-INK CHARTS, & COLORED FLOWCHARTS:\n"
@@ -522,7 +532,7 @@ def process_image_with_gemini(image_bytes: bytes, aggressive_whitening: bool = F
     raw_text = generate_with_multi_provider_fallback([image, prompt])
     cleaned_latex = raw_text
 
-    # 1. Process Tier 1: TikZ blocks (Kroki -> QuickLaTeX -> OpenCV Crop fallback)
+    # 1. Process Tier 1: TikZ / CircuiTikZ blocks (Kroki standalone -> QuickLaTeX -> OpenCV Crop fallback)
     tikz_pattern = r'```(?:tikz|latex)\s*(.*?)\s*```'
     tikz_matches = re.findall(tikz_pattern, cleaned_latex, re.DOTALL)
 
