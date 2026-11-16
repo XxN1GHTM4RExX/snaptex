@@ -280,11 +280,24 @@ def generate_with_multi_provider_fallback(contents: list) -> str:
 
 # ==============================================================================
 # 4-TIER VISUAL PIPELINE:
-# 1. TikZ / CircuiTikZ (QuickLaTeX -> Kroki -> Crop fallback)
+# 1. TikZ / CircuiTikZ (Kroki standalone PNG -> QuickLaTeX -> Crop fallback)
 # 2. Vtracer B&W Binary Vectorization (replaces Potrace in compiled Rust)
 # 3. Vtracer Multi-Color Vectorization
 # 4. OpenCV Background Whitening Crop
 # ==============================================================================
+
+def _flatten_to_white_png(raw_bytes: bytes, pad: int = 20) -> str:
+    """Composites any transparent PNG onto a solid white RGB canvas with padding."""
+    raw_img = Image.open(io.BytesIO(raw_bytes)).convert("RGBA")
+    white_bg = Image.new("RGBA", (raw_img.width + pad * 2, raw_img.height + pad * 2), (255, 255, 255, 255))
+    white_bg.paste(raw_img, (pad, pad), raw_img)
+    final_rgb = white_bg.convert("RGB")
+
+    out_buf = io.BytesIO()
+    final_rgb.save(out_buf, format="PNG")
+    b64_png = base64.b64encode(out_buf.getvalue()).decode("utf-8")
+    return f"data:image/png;base64,{b64_png}"
+
 
 def _crop_region(image: Image.Image, coords: list) -> Image.Image:
     """Safely crops a normalized [0..1000] bounding box with 5% padding."""
@@ -340,7 +353,6 @@ def vectorize_diagram_vtracer(image: Image.Image, coords: list, color_mode: str 
         img_np = np.array(cropped)
 
         if color_mode == "binary":
-            # Normalize uneven paper lighting & threshold into crisp ink on pure white
             gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (35, 35))
             bg = cv2.morphologyEx(gray, cv2.MORPH_DILATE, kernel)
@@ -350,7 +362,6 @@ def vectorize_diagram_vtracer(image: Image.Image, coords: list, color_mode: str 
             )
             prep_pil = Image.fromarray(binary).convert("RGBA")
         else:
-            # Mild illumination normalization before multi-color vector tracing
             lab = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB)
             l, a, b = cv2.split(lab)
             clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
@@ -386,8 +397,7 @@ def vectorize_diagram_vtracer(image: Image.Image, coords: list, color_mode: str 
 
 def _clean_tikz_snippet(raw_code: str) -> str:
     """Strips markdown fences and comment lines to isolate the TikZ/CircuiTikZ body."""
-    cleaned = re.sub(r'^#.*$', '', raw_code, flags=re.MULTILINE).strip()
-    # Extract \begin{tikzpicture}...\end{tikzpicture} or \begin{circuitikz}...\end{circuitikz} if wrapped in \documentclass
+    cleaned = re.sub(r'^[%#].*$', '', raw_code, flags=re.MULTILINE).strip()
     env_match = re.search(
         r'(\\begin\{(?:tikzpicture|circuitikz)\}[\s\S]*?\\end\{(?:tikzpicture|circuitikz)\})',
         cleaned
@@ -397,8 +407,21 @@ def _clean_tikz_snippet(raw_code: str) -> str:
     return cleaned
 
 
+def _render_via_kroki(tikz_body: str) -> str:
+    """Primary TikZ/CircuiTikZ renderer via Kroki standalone LaTeX engine."""
+    resp = requests.post(
+        "https://kroki.io/tikz/png",
+        data=tikz_body.encode("utf-8"),
+        headers={"Content-Type": "text/plain"},
+        timeout=12
+    )
+    if resp.status_code == 200 and resp.content:
+        return _flatten_to_white_png(resp.content)
+    return None
+
+
 def _render_via_quicklatex(tikz_body: str) -> str:
-    """Primary TikZ/CircuiTikZ renderer via QuickLaTeX API."""
+    """Secondary TikZ/CircuiTikZ renderer via QuickLaTeX API."""
     preamble = (
         "\\usepackage{amsmath,amssymb}\n"
         "\\usepackage{tikz}\n"
@@ -407,9 +430,9 @@ def _render_via_quicklatex(tikz_body: str) -> str:
     )
     payload = (
         f"formula={urllib.parse.quote(tikz_body)}"
-        f"&fsize=17px"
+        f"&fsize=20px"
         f"&fcolor=000000"
-        f"&mode=0"
+        f"&mode=1"
         f"&out=1"
         f"&remhost=quicklatex.com"
         f"&preamble={urllib.parse.quote(preamble)}"
@@ -422,51 +445,35 @@ def _render_via_quicklatex(tikz_body: str) -> str:
     )
     if resp.status_code == 200:
         lines = resp.text.strip().splitlines()
-        # QuickLaTeX returns status '0' on line 0 and '<image_url> <width> <height>' on line 1
         if len(lines) >= 2 and lines[0].strip() == "0":
             img_url = lines[1].split()[0]
             img_resp = requests.get(img_url, timeout=10)
             if img_resp.status_code == 200 and img_resp.content:
-                b64_png = base64.b64encode(img_resp.content).decode("utf-8")
-                return f"data:image/png;base64,{b64_png}"
-    return None
-
-
-def _render_via_kroki(tikz_body: str) -> str:
-    """Secondary fallback TikZ renderer via Kroki open-source diagram API."""
-    resp = requests.post(
-        "https://kroki.io/tikz/svg",
-        data=tikz_body.encode("utf-8"),
-        headers={"Content-Type": "text/plain"},
-        timeout=10
-    )
-    if resp.status_code == 200 and "<svg" in resp.text:
-        svg_b64 = base64.b64encode(resp.text.encode("utf-8")).decode("utf-8")
-        return f"data:image/svg+xml;base64,{svg_b64}"
+                return _flatten_to_white_png(img_resp.content)
     return None
 
 
 def render_tikz_diagram(raw_code: str) -> str:
-    """Tier 1: Compiles TikZ/CircuiTikZ via QuickLaTeX -> Kroki fallback."""
+    """Tier 1: Compiles TikZ/CircuiTikZ via Kroki standalone PNG -> QuickLaTeX fallback."""
     tikz_body = _clean_tikz_snippet(raw_code)
     if not tikz_body:
         return None
 
     try:
-        res = _render_via_quicklatex(tikz_body)
-        if res:
-            print("[TikZ Renderer]: Compiled successfully via QuickLaTeX.")
-            return res
-    except Exception as e:
-        print(f"[QuickLaTeX Error]: {e}")
-
-    try:
         res = _render_via_kroki(tikz_body)
         if res:
-            print("[TikZ Renderer]: Compiled successfully via Kroki fallback.")
+            print("[TikZ Renderer]: Compiled successfully via Kroki.")
             return res
     except Exception as e:
         print(f"[Kroki TikZ Error]: {e}")
+
+    try:
+        res = _render_via_quicklatex(tikz_body)
+        if res:
+            print("[TikZ Renderer]: Compiled successfully via QuickLaTeX fallback.")
+            return res
+    except Exception as e:
+        print(f"[QuickLaTeX Error]: {e}")
 
     return None
 
@@ -485,7 +492,7 @@ def process_image_with_gemini(image_bytes: bytes, aggressive_whitening: bool = F
         "      Output a standalone ```tikz ... ``` block directly where the diagram appears.\n"
         "      - First line inside the block MUST be: `% BOUNDS: ymin, xmin, ymax, xmax` (normalized 0-1000 coordinates for fallback).\n"
         "      - Write ONLY the `\\begin{tikzpicture} ... \\end{tikzpicture}` or `\\begin{circuitikz} ... \\end{circuitikz}` environment (no `\\documentclass` or `\\begin{document}`).\n"
-        "      - Keep coordinates clean, compact, and well-labeled.\n"
+        "      - Use explicit coordinates so components and labels are cleanly spaced.\n"
         "   b. HAND-DRAWN CURVES, STATISTICAL GRAPHS, & BLACK-AND-WHITE LINE SKETCHES:\n"
         "      Return exact bounding boxes using: [VECTOR_BW: ymin, xmin, ymax, xmax].\n"
         "   c. COLORED DIAGRAMS, MULTI-INK CHARTS, & COLORED FLOWCHARTS:\n"
@@ -497,7 +504,7 @@ def process_image_with_gemini(image_bytes: bytes, aggressive_whitening: bool = F
     raw_text = generate_with_multi_provider_fallback([image, prompt])
     cleaned_latex = raw_text
 
-    # 1. Process Tier 1: TikZ / CircuiTikZ blocks (QuickLaTeX -> Kroki -> OpenCV Crop fallback)
+    # 1. Process Tier 1: TikZ / CircuiTikZ blocks (Kroki -> QuickLaTeX -> OpenCV Crop fallback)
     tikz_pattern = r'```(?:tikz|latex)\s*(.*?)\s*```'
     tikz_matches = re.findall(tikz_pattern, cleaned_latex, re.DOTALL)
 
