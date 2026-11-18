@@ -12,7 +12,8 @@ import 'katex/dist/katex.min.css'
 import {
   Bold, Italic, Heading1, Heading2, List, ListOrdered,
   Table as TableIcon, Sigma, Download, Save, X, Check,
-  Sparkles, ChevronLeft, ChevronRight, BookOpen, Bot, Send, Loader2
+  Sparkles, ChevronLeft, ChevronRight, BookOpen, Bot, Send, Loader2,
+  Pin, Replace
 } from 'lucide-react'
 import { markdownToHtml, htmlToMarkdown } from '../lib/markdownBridge'
 import { supabase } from '../lib/supabase'
@@ -33,6 +34,12 @@ interface MathModalState {
   editPos?: number
 }
 
+interface TaggedSpot {
+  from: number
+  to: number
+  previewText: string
+}
+
 export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
   initialContent,
   title,
@@ -48,7 +55,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
   })
   const [previewHtml, setPreviewHtml] = useState('')
 
-  // Book View & Copilot States
+  // Book View, Surgical Tagging & Copilot States
   const [isBookView, setIsBookView] = useState(false)
   const [currentPageIndex, setCurrentPageIndex] = useState(0)
   const [isCopilotOpen, setIsCopilotOpen] = useState(false)
@@ -56,6 +63,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
   const [copilotPrompt, setCopilotPrompt] = useState('')
   const [isCopilotLoading, setIsCopilotLoading] = useState(false)
   const [copilotResponse, setCopilotResponse] = useState<any>(null)
+  const [taggedSpot, setTaggedSpot] = useState<TaggedSpot | null>(null)
 
   const API_URL = import.meta.env.VITE_API_URL || 'https://snaptex.onrender.com'
 
@@ -126,11 +134,51 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
     const newHtml = markdownToHtml(contentToLoad)
     if (editor.getHTML() !== newHtml) {
       editor.commands.setContent(newHtml)
+      setTaggedSpot(null)
     }
   }, [currentPageIndex, isBookView, pages, initialContent, editor])
 
   if (!editor) {
     return <div className="p-8 text-zinc-400">Loading editor...</div>
+  }
+
+  const handleToggleCopilot = () => {
+    const nextState = !isCopilotOpen
+    setIsCopilotOpen(nextState)
+    // Automatically switch multi-page documents to Book View when opening Copilot
+    if (nextState && pages.length > 1) {
+      setIsBookView(true)
+    }
+  }
+
+  // Capture highlighted text OR the entire current block/line under the cursor
+  const handleTagSpot = () => {
+    const { from, to, $from } = editor.state.selection
+    let tagFrom = from
+    let tagTo = to
+
+    if (from === to) {
+      // Nothing highlighted: lock onto the entire current paragraph/block node
+      tagFrom = $from.start($from.depth)
+      tagTo = $from.end($from.depth)
+    }
+
+    const extractedText = editor.state.doc.textBetween(tagFrom, tagTo, ' ').trim()
+    if (!extractedText) {
+      alert('Place your cursor on a line or highlight a formula first to tag it.')
+      return
+    }
+
+    setTaggedSpot({
+      from: tagFrom,
+      to: tagTo,
+      previewText: extractedText,
+    })
+
+    if (!isCopilotOpen) {
+      setIsCopilotOpen(true)
+      if (pages.length > 1) setIsBookView(true)
+    }
   }
 
   const handleSaveClick = () => {
@@ -175,7 +223,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
 
   const handleRunCopilot = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!copilotPrompt.trim()) return
+    if (!copilotPrompt.trim() && !taggedSpot) return
 
     setIsCopilotLoading(true)
     setCopilotResponse(null)
@@ -185,7 +233,15 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
       const token = session?.access_token
       if (!token) throw new Error('Session expired. Please sign in again.')
 
-      const activePageContent = isBookView && pages.length > 0 ? pages[currentPageIndex] : initialContent
+      const activePageContent = isBookView && pages.length > 0
+        ? pages[currentPageIndex]
+        : htmlToMarkdown(editor.getHTML())
+
+      const effectivePrompt = taggedSpot
+        ? `[TAGGED TARGET LINE/SELECTION]: "${taggedSpot.previewText}"\n\nUser Instruction: ${
+            copilotPrompt.trim() || 'Fix any OCR/grammar/LaTeX errors in this exact tagged line and return the clean replacement in suggested_patch.'
+          }`
+        : copilotPrompt
 
       const res = await fetch(`${API_URL}/ai-assist`, {
         method: 'POST',
@@ -197,7 +253,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
           full_markdown: initialContent,
           active_page_content: activePageContent,
           active_page_number: currentPageIndex + 1,
-          user_prompt: copilotPrompt,
+          user_prompt: effectivePrompt,
           mode: copilotMode,
         }),
       })
@@ -223,13 +279,33 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
     }
   }
 
+  const handleApplySurgicalPatch = () => {
+    if (!copilotResponse || typeof copilotResponse === 'string' || !copilotResponse.suggested_patch) return
+    const patchHtml = markdownToHtml(copilotResponse.suggested_patch)
+
+    if (taggedSpot) {
+      editor
+        .chain()
+        .focus()
+        .insertContentAt({ from: taggedSpot.from, to: taggedSpot.to }, patchHtml)
+        .run()
+      setTaggedSpot(null)
+    } else {
+      editor.chain().focus().insertContent(patchHtml).run()
+    }
+  }
+
   const handleInsertExplanation = () => {
     if (!copilotResponse) return
     const explanationText = typeof copilotResponse === 'string' ? copilotResponse : copilotResponse.explanation
     if (!explanationText) return
 
-    editor.chain().focus().insertContent(`\n\n> **Copilot Explanation:** ${explanationText}\n\n`).run()
-    setIsCopilotOpen(false)
+    const insertPos = taggedSpot ? taggedSpot.to : editor.state.selection.to
+    editor
+      .chain()
+      .focus()
+      .insertContentAt(insertPos, `\n\n> **Copilot Note:** ${explanationText}\n\n`)
+      .run()
   }
 
   return (
@@ -273,10 +349,10 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
             value={title}
             onChange={(e) => onTitleChange(e.target.value)}
             placeholder="Untitled Document..."
-            className="bg-transparent text-xl font-bold text-white focus:outline-none w-1/2 placeholder:text-zinc-600"
+            className="bg-transparent text-xl font-bold text-white focus:outline-none w-1/3 placeholder:text-zinc-600"
           />
 
-          <div className="flex items-center space-x-3">
+          <div className="flex items-center space-x-2.5">
             <button
               onClick={() => setIsBookView(!isBookView)}
               className={`flex items-center space-x-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
@@ -290,7 +366,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
             </button>
 
             <button
-              onClick={() => setIsCopilotOpen(!isCopilotOpen)}
+              onClick={handleToggleCopilot}
               className="flex items-center space-x-1.5 px-3.5 py-1.5 bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 text-sm font-medium rounded-lg transition-colors border border-rose-500/40"
             >
               <Bot className="w-4 h-4 text-rose-400" />
@@ -314,7 +390,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
           </div>
         </div>
 
-        {/* Book View Pagination Bar (If active) */}
+        {/* Book View Pagination Bar */}
         {isBookView && pages.length > 1 && (
           <div className="flex items-center justify-between px-6 py-2 bg-[#222222] border-b border-zinc-800 text-xs text-zinc-300">
             <button
@@ -339,67 +415,83 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
           </div>
         )}
 
-        {/* Formatting Bubble Bar */}
-        <div className="flex items-center space-x-1 px-6 py-2 bg-[#222222] border-b border-zinc-800/80 overflow-x-auto text-zinc-400">
+        {/* Formatting & Surgical Tagging Bar */}
+        <div className="flex items-center justify-between px-6 py-2 bg-[#222222] border-b border-zinc-800/80 overflow-x-auto text-zinc-400">
+          <div className="flex items-center space-x-1">
+            <button
+              onClick={() => editor.chain().focus().toggleBold().run()}
+              className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('bold') ? 'bg-zinc-700 text-white' : ''}`}
+              title="Bold"
+            >
+              <Bold className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => editor.chain().focus().toggleItalic().run()}
+              className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('italic') ? 'bg-zinc-700 text-white' : ''}`}
+              title="Italic"
+            >
+              <Italic className="w-4 h-4" />
+            </button>
+            <div className="w-[1px] h-4 bg-zinc-700 mx-1" />
+            <button
+              onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
+              className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('heading', { level: 1 }) ? 'bg-zinc-700 text-white' : ''}`}
+              title="Heading 1"
+            >
+              <Heading1 className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
+              className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('heading', { level: 2 }) ? 'bg-zinc-700 text-white' : ''}`}
+              title="Heading 2"
+            >
+              <Heading2 className="w-4 h-4" />
+            </button>
+            <div className="w-[1px] h-4 bg-zinc-700 mx-1" />
+            <button
+              onClick={() => editor.chain().focus().toggleBulletList().run()}
+              className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('bulletList') ? 'bg-zinc-700 text-white' : ''}`}
+              title="Bullet List"
+            >
+              <List className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => editor.chain().focus().toggleOrderedList().run()}
+              className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('orderedList') ? 'bg-zinc-700 text-white' : ''}`}
+              title="Numbered List"
+            >
+              <ListOrdered className="w-4 h-4" />
+            </button>
+            <div className="w-[1px] h-4 bg-zinc-700 mx-1" />
+            <button
+              onClick={() => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}
+              className="p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors"
+              title="Insert Table"
+            >
+              <TableIcon className="w-4 h-4" />
+            </button>
+            <button
+              onClick={openInsertMathModal}
+              className="flex items-center space-x-1 px-2 py-1 rounded hover:bg-zinc-700 hover:text-white transition-colors text-xs font-medium"
+              title="Insert or Edit LaTeX Equation"
+            >
+              <Sigma className="w-4 h-4 text-rose-400" />
+              <span>Equation</span>
+            </button>
+          </div>
+
+          {/* Surgical Spot Tag Button */}
           <button
-            onClick={() => editor.chain().focus().toggleBold().run()}
-            className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('bold') ? 'bg-zinc-700 text-white' : ''}`}
-            title="Bold"
+            onClick={handleTagSpot}
+            className={`flex items-center space-x-1.5 px-3 py-1 rounded-lg text-xs font-medium transition-colors border ${
+              taggedSpot
+                ? 'bg-amber-500/20 border-amber-500/60 text-amber-300'
+                : 'bg-zinc-800 hover:bg-zinc-700 border-zinc-700 text-zinc-200'
+            }`}
+            title="Click a line or highlight text, then click Tag Spot for surgical AI edits"
           >
-            <Bold className="w-4 h-4" />
-          </button>
-          <button
-            onClick={() => editor.chain().focus().toggleItalic().run()}
-            className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('italic') ? 'bg-zinc-700 text-white' : ''}`}
-            title="Italic"
-          >
-            <Italic className="w-4 h-4" />
-          </button>
-          <div className="w-[1px] h-4 bg-zinc-700 mx-1" />
-          <button
-            onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
-            className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('heading', { level: 1 }) ? 'bg-zinc-700 text-white' : ''}`}
-            title="Heading 1"
-          >
-            <Heading1 className="w-4 h-4" />
-          </button>
-          <button
-            onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
-            className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('heading', { level: 2 }) ? 'bg-zinc-700 text-white' : ''}`}
-            title="Heading 2"
-          >
-            <Heading2 className="w-4 h-4" />
-          </button>
-          <div className="w-[1px] h-4 bg-zinc-700 mx-1" />
-          <button
-            onClick={() => editor.chain().focus().toggleBulletList().run()}
-            className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('bulletList') ? 'bg-zinc-700 text-white' : ''}`}
-            title="Bullet List"
-          >
-            <List className="w-4 h-4" />
-          </button>
-          <button
-            onClick={() => editor.chain().focus().toggleOrderedList().run()}
-            className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('orderedList') ? 'bg-zinc-700 text-white' : ''}`}
-            title="Numbered List"
-          >
-            <ListOrdered className="w-4 h-4" />
-          </button>
-          <div className="w-[1px] h-4 bg-zinc-700 mx-1" />
-          <button
-            onClick={() => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}
-            className="p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors"
-            title="Insert Table"
-          >
-            <TableIcon className="w-4 h-4" />
-          </button>
-          <button
-            onClick={openInsertMathModal}
-            className="flex items-center space-x-1 px-2 py-1 rounded hover:bg-zinc-700 hover:text-white transition-colors text-xs font-medium"
-            title="Insert or Edit LaTeX Equation"
-          >
-            <Sigma className="w-4 h-4 text-rose-400" />
-            <span>Equation</span>
+            <Pin className="w-3.5 h-3.5 text-amber-400" />
+            <span>{taggedSpot ? 'Spot Tagged' : 'Tag Spot for AI'}</span>
           </button>
         </div>
 
@@ -412,51 +504,84 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
       {/* AI Copilot Slide-Out Drawer */}
       {isCopilotOpen && (
         <aside className="w-96 bg-[#222222] border-l border-zinc-800 flex flex-col justify-between shadow-2xl z-20">
-          <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
-            <div className="flex items-center space-x-2">
-              <Sparkles className="w-4 h-4 text-rose-400" />
-              <h3 className="font-semibold text-white text-sm">SnapTex AI Copilot</h3>
+          <div>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
+              <div className="flex items-center space-x-2">
+                <Sparkles className="w-4 h-4 text-rose-400" />
+                <h3 className="font-semibold text-white text-sm">SnapTex AI Copilot</h3>
+              </div>
+              <button
+                onClick={() => setIsCopilotOpen(false)}
+                className="text-zinc-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
-            <button
-              onClick={() => setIsCopilotOpen(false)}
-              className="text-zinc-400 hover:text-white"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
 
-          <div className="p-4 border-b border-zinc-800 flex space-x-1 bg-[#1c1c1c]">
-            <button
-              onClick={() => setCopilotMode('explain')}
-              className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                copilotMode === 'explain' ? 'bg-rose-600 text-white' : 'text-zinc-400 hover:text-white'
-              }`}
-            >
-              Explain / Verify
-            </button>
-            <button
-              onClick={() => setCopilotMode('fix_ocr')}
-              className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                copilotMode === 'fix_ocr' ? 'bg-rose-600 text-white' : 'text-zinc-400 hover:text-white'
-              }`}
-            >
-              Fix LaTeX
-            </button>
-            <button
-              onClick={() => setCopilotMode('exercise')}
-              className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                copilotMode === 'exercise' ? 'bg-rose-600 text-white' : 'text-zinc-400 hover:text-white'
-              }`}
-            >
-              Exercises
-            </button>
+            <div className="p-3 border-b border-zinc-800 flex space-x-1 bg-[#1c1c1c]">
+              <button
+                onClick={() => setCopilotMode('explain')}
+                className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                  copilotMode === 'explain' ? 'bg-rose-600 text-white' : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                Explain / Verify
+              </button>
+              <button
+                onClick={() => setCopilotMode('fix_ocr')}
+                className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                  copilotMode === 'fix_ocr' ? 'bg-rose-600 text-white' : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                Fix LaTeX
+              </button>
+              <button
+                onClick={() => setCopilotMode('exercise')}
+                className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                  copilotMode === 'exercise' ? 'bg-rose-600 text-white' : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                Exercises
+              </button>
+            </div>
+
+            {/* Active Tagged Spot Banner */}
+            <div className="px-4 py-2.5 bg-[#191919] border-b border-zinc-800">
+              {taggedSpot ? (
+                <div className="flex items-start justify-between gap-2 p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30">
+                  <div className="text-[11px] text-amber-200 leading-snug">
+                    <span className="font-semibold uppercase tracking-wider text-amber-400 block mb-0.5">
+                      Pinned Target Line:
+                    </span>
+                    <span className="line-clamp-2 italic">"{taggedSpot.previewText}"</span>
+                  </div>
+                  <button
+                    onClick={() => setTaggedSpot(null)}
+                    className="text-amber-400/70 hover:text-amber-200 shrink-0"
+                    title="Clear Tagged Spot"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between text-[11px] text-zinc-400">
+                  <span>Click any line in the editor to pin an exact edit spot.</span>
+                  <button
+                    onClick={handleTagSpot}
+                    className="ml-2 px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-amber-300 rounded font-medium shrink-0"
+                  >
+                    + Tag Cursor Line
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="flex-1 p-4 overflow-y-auto space-y-4 text-sm text-zinc-300">
             {isCopilotLoading ? (
               <div className="flex flex-col items-center justify-center h-48 space-y-2 text-zinc-400">
                 <Loader2 className="w-6 h-6 text-rose-500 animate-spin" />
-                <span className="text-xs">Analyzing page content...</span>
+                <span className="text-xs">Analyzing {taggedSpot ? 'tagged line' : 'page content'}...</span>
               </div>
             ) : copilotResponse ? (
               <div className="space-y-3 bg-[#181818] p-3.5 rounded-xl border border-zinc-800">
@@ -466,17 +591,42 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                     ? copilotResponse
                     : copilotResponse.explanation || JSON.stringify(copilotResponse)}
                 </div>
+
+                {/* Suggested Surgical Patch Preview */}
+                {typeof copilotResponse === 'object' && copilotResponse.suggested_patch && (
+                  <div className="p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 space-y-2">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-emerald-400">
+                      Proposed Replacement
+                    </div>
+                    <pre className="text-[11px] font-mono text-emerald-200 whitespace-pre-wrap break-words">
+                      {copilotResponse.suggested_patch}
+                    </pre>
+                    <button
+                      onClick={handleApplySurgicalPatch}
+                      className="w-full flex items-center justify-center space-x-1.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium rounded-lg transition-colors"
+                    >
+                      <Replace className="w-3.5 h-3.5" />
+                      <span>{taggedSpot ? 'Replace Tagged Spot' : 'Insert Patch'}</span>
+                    </button>
+                  </div>
+                )}
+
                 <button
                   onClick={handleInsertExplanation}
                   className="w-full mt-2 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-medium rounded-lg transition-colors shadow"
                 >
-                  Insert Explanation Into Notes
+                  Insert Explanation {taggedSpot ? 'Below Tagged Spot' : 'Into Notes'}
                 </button>
               </div>
             ) : (
               <div className="text-center py-12 text-zinc-500 text-xs">
                 Ask the copilot to explain proofs, check formulas, or generate practice exercises for{' '}
-                {isBookView ? `Page ${currentPageIndex + 1}` : 'this document'}.
+                {taggedSpot
+                  ? 'your pinned target line'
+                  : isBookView
+                  ? `Page ${currentPageIndex + 1}`
+                  : 'this document'}
+                .
               </div>
             )}
           </div>
@@ -487,7 +637,9 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
               value={copilotPrompt}
               onChange={e => setCopilotPrompt(e.target.value)}
               placeholder={
-                copilotMode === 'explain'
+                taggedSpot
+                  ? 'Optional: describe how to modify the tagged spot (or click Ask Copilot to auto-fix)...'
+                  : copilotMode === 'explain'
                   ? 'e.g. Explain step 2 of this limit derivation...'
                   : copilotMode === 'fix_ocr'
                   ? 'e.g. Fix any broken LaTeX fraction brackets...'
