@@ -13,6 +13,17 @@ interface DocumentItem {
   created_at: string
 }
 
+function formatApiError(errData: any, fallback: string): string {
+  if (!errData?.detail) return fallback
+  if (typeof errData.detail === 'string') return errData.detail
+  if (Array.isArray(errData.detail)) {
+    return errData.detail
+      .map((item: any) => item?.msg || JSON.stringify(item))
+      .join(', ')
+  }
+  return JSON.stringify(errData.detail)
+}
+
 export default function App() {
   const [user, setUser] = useState<any>(null)
   const [authEmail, setAuthEmail] = useState('')
@@ -127,7 +138,7 @@ export default function App() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => null)
-        throw new Error(errData?.detail || `Server error: ${res.statusText}`)
+        throw new Error(formatApiError(errData, `Server error: ${res.statusText}`))
       }
 
       const data = await res.json()
@@ -174,7 +185,7 @@ export default function App() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => null)
-        throw new Error(errData?.detail || 'Failed to save changes.')
+        throw new Error(formatApiError(errData, 'Failed to save changes.'))
       }
 
       const updated = { ...currentDoc, content: markdown }
@@ -257,7 +268,7 @@ export default function App() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => null)
-        throw new Error(errData?.detail || 'Failed to generate Word document.')
+        throw new Error(formatApiError(errData, 'Failed to generate Word document.'))
       }
 
       const blob = await res.blob()
