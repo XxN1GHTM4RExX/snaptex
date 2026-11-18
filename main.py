@@ -1,7 +1,9 @@
 import io
+import json
 import os
 import re
 import tempfile
+import urllib.request
 from typing import List
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,7 +24,7 @@ from database import (
     update_transcription_content
 )
 
-app = FastAPI(title="SnapTex API", version="1.5")
+app = FastAPI(title="SnapTex API", version="1.6")
 
 app.add_middleware(
     CORSMiddleware,
@@ -98,9 +100,95 @@ def pdf_bytes_to_png_pages(pdf_bytes: bytes, max_pages: int = MAX_PAGES) -> List
     return page_images
 
 
+def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> str:
+    """Tries Gemini 3.8 Flash -> Groq -> OpenRouter with strict JSON output."""
+    errors = []
+
+    # 1. Try Gemini 3.8 Flash
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    if gemini_key:
+        try:
+            from google import genai
+            client = genai.Client(api_key=gemini_key)
+            response = client.models.generate_content(
+                model="gemini-3.8-flash",
+                contents=context_prompt,
+                config={
+                    "system_instruction": system_instruction,
+                    "response_mime_type": "application/json",
+                },
+            )
+            if response.text:
+                return response.text
+        except Exception as e:
+            errors.append(f"Gemini failed: {str(e)}")
+
+    # 2. Fallback to Groq (Llama 3.3 70B Versatile)
+    groq_key = os.getenv("GROQ_API_KEY")
+    if groq_key:
+        try:
+            req_body = json.dumps({
+                "model": "llama-3.3-70b-versatile",
+                "messages": [
+                    {"role": "system", "content": system_instruction},
+                    {"role": "user", "content": context_prompt},
+                ],
+                "response_format": {"type": "json_object"},
+                "temperature": 0.2,
+            }).encode("utf-8")
+
+            req = urllib.request.Request(
+                "https://api.groq.com/openai/v1/chat/completions",
+                data=req_body,
+                headers={
+                    "Authorization": f"Bearer {groq_key}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=45) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return data["choices"][0]["message"]["content"]
+        except Exception as e:
+            errors.append(f"Groq failed: {str(e)}")
+
+    # 3. Fallback to OpenRouter
+    openrouter_key = os.getenv("OPENROUTER_API_KEY")
+    if openrouter_key:
+        try:
+            req_body = json.dumps({
+                "model": "qwen/qwen-2.5-72b-instruct:free",
+                "messages": [
+                    {"role": "system", "content": system_instruction},
+                    {"role": "user", "content": context_prompt},
+                ],
+                "response_format": {"type": "json_object"},
+                "temperature": 0.2,
+            }).encode("utf-8")
+
+            req = urllib.request.Request(
+                "https://openrouter.ai/api/v1/chat/completions",
+                data=req_body,
+                headers={
+                    "Authorization": f"Bearer {openrouter_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://snaptex-web.onrender.com",
+                    "X-Title": "SnapTex AI Copilot",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return data["choices"][0]["message"]["content"]
+        except Exception as e:
+            errors.append(f"OpenRouter failed: {str(e)}")
+
+    raise RuntimeError(" | ".join(errors) if errors else "No AI provider API keys configured.")
+
+
 @app.get("/")
 def read_root():
-    return {"message": "SnapTex API (Batch OCR + Native DOCX Export + Surgical AI Copilot) is online and healthy!"}
+    return {"message": "SnapTex API (Batch OCR + Native DOCX Export + Multi-Provider AI Copilot) is online and healthy!"}
 
 
 @app.post("/process-document")
@@ -197,19 +285,15 @@ async def ai_assist(
     payload: AIAssistRequest,
     authorization: str = Header(...)
 ):
-    """Surgical AI Copilot endpoint with page context, solution file generation, and structured JSON output."""
+    """Surgical AI Copilot endpoint with Gemini 3.8 -> Groq -> OpenRouter fallback."""
     verify_token(authorization)
 
     try:
-        from google import genai
-
-        client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-
         system_instruction = (
             "You are SnapTex Copilot, an expert university-level STEM assistant. "
             "You help students audit math/physics proofs, fix OCR LaTeX errors, generate practice exercises, "
             "and produce complete step-by-step solution documents. "
-            "You must return a valid JSON response with keys: "
+            "You MUST return strictly valid JSON with exact keys: "
             "'explanation' (concise summary or explanation in Markdown with KaTeX math), "
             "'suggested_patch' (corrected markdown snippet when editing a tagged line, or null), "
             "'solution_title' (if mode is 'solution', a clean title like 'Solution - <Topic>', else null), and "
@@ -225,16 +309,8 @@ async def ai_assist(
             f"User Request: {payload.user_prompt}"
         )
 
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=context_prompt,
-            config={
-                "system_instruction": system_instruction,
-                "response_mime_type": "application/json",
-            },
-        )
-
-        return {"status": "success", "result": response.text}
+        result_json = run_copilot_with_fallback(system_instruction, context_prompt)
+        return {"status": "success", "result": result_json}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI Copilot failed: {str(e)}")
 
