@@ -117,7 +117,7 @@ def _extract_clean_json(raw_text: str) -> str:
 
 
 def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> str:
-    """Uses provider_manager key pools: Gemini 3.8+ -> Groq -> OpenRouter with strict JSON output."""
+    """Uses provider_manager key pools: Gemini 2.5 -> Groq -> OpenRouter with strict JSON output."""
     provider_manager.reload_all()
     errors = []
 
@@ -128,8 +128,8 @@ def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> s
         try:
             from google import genai
             from google.genai.errors import APIError
-            client = genai.Client(api_key=g_key, http_options={"timeout": 45000})
-            for model_name in ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro-preview"]:
+            client = genai.Client(api_key=g_key, http_options={"timeout": 60000})
+            for model_name in ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"]:
                 try:
                     response = client.models.generate_content(
                         model=model_name,
@@ -170,6 +170,7 @@ def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> s
                 headers={
                     "Authorization": f"Bearer {groq_key}",
                     "Content-Type": "application/json",
+                    "User-Agent": "SnapTex-Backend/2.0",
                 },
                 method="POST",
             )
@@ -187,7 +188,7 @@ def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> s
             break
         try:
             req_body = json.dumps({
-                "model": "qwen/qwen-2.5-72b-instruct:free",
+                "model": "openrouter/free",
                 "messages": [
                     {"role": "system", "content": system_instruction},
                     {"role": "user", "content": context_prompt},
@@ -202,7 +203,8 @@ def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> s
                 headers={
                     "Authorization": f"Bearer {or_key}",
                     "Content-Type": "application/json",
-                    "HTTP-Referer": "https://snaptex-web.onrender.com",
+                    "User-Agent": "SnapTex-Backend/2.0",
+                    "HTTP-Referer": "https://snaptex-omega.vercel.app",
                     "X-Title": "SnapTex AI Copilot",
                 },
                 method="POST",
@@ -317,7 +319,7 @@ async def ai_assist(
     payload: AIAssistRequest,
     authorization: str = Header(...)
 ):
-    """Surgical AI Copilot endpoint backed by pooled Gemini 3.8+ -> Groq -> OpenRouter."""
+    """Surgical AI Copilot endpoint backed by pooled Gemini 2.5 -> Groq -> OpenRouter."""
     verify_token(authorization)
 
     try:
