@@ -160,7 +160,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
     content: markdownToHtml(isBookView && pages.length > 0 ? pages[currentPageIndex] : initialContent),
     editorProps: {
       attributes: {
-        class: 'snaptex-prose focus:outline-none max-w-none min-h-[60vh] px-8 py-6 text-zinc-100',
+        class: 'snaptex-prose focus:outline-none max-w-none min-h-[60vh] px-4 sm:px-8 py-5 sm:py-6 text-zinc-100',
       },
     },
   })
@@ -353,6 +353,10 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
     } else {
       editor.chain().focus().insertContent(patchHtml).run()
     }
+
+    if (typeof window !== 'undefined' && window.innerWidth < 768) {
+      setIsCopilotOpen(false)
+    }
   }
 
   const handleOpenSolutionInWorkspace = () => {
@@ -364,6 +368,10 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
     } else {
       onTitleChange(solTitle)
       editor.commands.setContent(markdownToHtml(copilotResponse.solution_markdown))
+    }
+
+    if (typeof window !== 'undefined' && window.innerWidth < 768) {
+      setIsCopilotOpen(false)
     }
   }
 
@@ -379,6 +387,10 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
       .focus()
       .insertContentAt(insertPos, `\n\n> **${notePrefix}:** ${explanationText}\n\n`)
       .run()
+
+    if (typeof window !== 'undefined' && window.innerWidth < 768) {
+      setIsCopilotOpen(false)
+    }
   }
 
   const emptyTargetLabel = taggedSpot
@@ -390,7 +402,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
   return (
     <div className="relative flex h-full bg-[#1e1e1e] border border-zinc-800 rounded-xl shadow-2xl overflow-hidden print:border-none print:shadow-none print:bg-white print:h-auto print:overflow-visible">
       {/* Main Workspace Column */}
-      <div className="flex-1 flex flex-col h-full overflow-hidden print:h-auto print:overflow-visible">
+      <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden print:h-auto print:overflow-visible">
         <style>{`
           .snaptex-prose h1 { font-size: 1.75rem; font-weight: 700; margin: 1rem 0 0.5rem; color: #fff; }
           .snaptex-prose h2 { font-size: 1.35rem; font-weight: 600; margin: 0.9rem 0 0.4rem; color: #f4f4f5; }
@@ -430,32 +442,32 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
           }
         `}</style>
 
-        {/* Top Header & Toolbar */}
-        <div className="flex items-center justify-between px-6 py-3.5 bg-[#252525] border-b border-zinc-800 print:bg-white print:border-zinc-300">
+        {/* Responsive Top Header & Toolbar */}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 px-4 sm:px-6 py-3 bg-[#252525] border-b border-zinc-800 print:bg-white print:border-zinc-300">
           <input
             type="text"
             value={title}
             onChange={(e) => onTitleChange(e.target.value)}
             placeholder={t.untitledDoc}
-            className="bg-transparent text-xl font-bold text-white print:text-black focus:outline-none w-1/3 print:w-full placeholder:text-zinc-600"
+            className="bg-transparent text-lg sm:text-xl font-bold text-white print:text-black focus:outline-none w-full sm:w-1/3 print:w-full placeholder:text-zinc-600"
           />
 
-          <div className="flex items-center space-x-2.5 print:hidden">
+          <div className="flex flex-wrap items-center gap-2 print:hidden">
             <button
               onClick={() => setIsBookView(!isBookView)}
-              className={`flex items-center space-x-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+              className={`flex items-center space-x-1.5 px-2.5 sm:px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
                 isBookView
                   ? 'bg-rose-600/20 border-rose-500 text-rose-300'
                   : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'
               }`}
             >
-              <BookOpen className="w-4 h-4 text-rose-400" />
+              <BookOpen className="w-3.5 h-3.5 text-rose-400" />
               <span>{isBookView ? t.bookViewOn : t.bookView}</span>
             </button>
 
             <button
               onClick={handleToggleCopilot}
-              className="flex items-center space-x-1.5 px-3.5 py-1.5 bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 text-sm font-medium rounded-lg transition-colors border border-rose-500/40"
+              className="flex items-center space-x-1.5 px-3 py-1.5 bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 text-xs sm:text-sm font-medium rounded-lg transition-colors border border-rose-500/40"
             >
               <Bot className="w-4 h-4 text-rose-400" />
               <span>{t.aiCopilot}</span>
@@ -465,9 +477,9 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
             <div className="relative" ref={exportMenuRef}>
               <button
                 onClick={() => setIsExportMenuOpen(prev => !prev)}
-                className="flex items-center space-x-1.5 px-3.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-sm font-medium rounded-lg transition-colors border border-zinc-700"
+                className="flex items-center space-x-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs sm:text-sm font-medium rounded-lg transition-colors border border-zinc-700"
               >
-                <Download className="w-4 h-4 text-rose-400" />
+                <Download className="w-3.5 h-3.5 text-rose-400" />
                 <span>{t.exportBtn}</span>
                 <ChevronDown className="w-3.5 h-3.5 text-zinc-400" />
               </button>
@@ -520,9 +532,9 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
 
             <button
               onClick={handleSaveClick}
-              className="flex items-center space-x-1.5 px-4 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-sm font-medium rounded-lg transition-colors shadow-lg shadow-rose-600/20"
+              className="flex items-center space-x-1.5 px-3.5 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs sm:text-sm font-medium rounded-lg transition-colors shadow-lg shadow-rose-600/20"
             >
-              <Save className="w-4 h-4" />
+              <Save className="w-3.5 h-3.5" />
               <span>{t.saveToHistory}</span>
             </button>
           </div>
@@ -530,7 +542,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
 
         {/* Book View Pagination Bar */}
         {isBookView && pages.length > 1 && (
-          <div className="flex items-center justify-between px-6 py-2 bg-[#222222] border-b border-zinc-800 text-xs text-zinc-300 print:hidden">
+          <div className="flex items-center justify-between px-4 sm:px-6 py-2 bg-[#222222] border-b border-zinc-800 text-xs text-zinc-300 print:hidden">
             <button
               onClick={() => setCurrentPageIndex(prev => Math.max(0, prev - 1))}
               disabled={currentPageIndex === 0}
@@ -554,8 +566,8 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
         )}
 
         {/* Formatting & Surgical Tagging Bar */}
-        <div className="flex items-center justify-between px-6 py-2 bg-[#222222] border-b border-zinc-800/80 overflow-x-auto text-zinc-400 print:hidden">
-          <div className="flex items-center space-x-1">
+        <div className="flex items-center justify-between gap-2 px-4 sm:px-6 py-2 bg-[#222222] border-b border-zinc-800/80 overflow-x-auto text-zinc-400 print:hidden">
+          <div className="flex items-center space-x-1 shrink-0">
             <button
               onClick={() => editor.chain().focus().toggleBold().run()}
               className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('bold') ? 'bg-zinc-700 text-white' : ''}`}
@@ -612,7 +624,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
 
           <button
             onClick={handleTagSpot}
-            className={`flex items-center space-x-1.5 px-3 py-1 rounded-lg text-xs font-medium transition-colors border ${
+            className={`flex items-center space-x-1.5 px-3 py-1 rounded-lg text-xs font-medium transition-colors border shrink-0 ${
               taggedSpot
                 ? 'bg-amber-500/20 border-amber-500/60 text-amber-300'
                 : 'bg-zinc-800 hover:bg-zinc-700 border-zinc-700 text-zinc-200'
@@ -629,9 +641,9 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
         </div>
       </div>
 
-      {/* AI Copilot Slide-Out Drawer */}
+      {/* Responsive AI Copilot Drawer (Full-Screen on Mobile, Side Panel on Desktop) */}
       {isCopilotOpen && (
-        <aside className="w-96 bg-[#222222] border-l border-zinc-800 flex flex-col justify-between shadow-2xl z-20 print:hidden">
+        <aside className="fixed inset-0 z-50 w-full md:static md:w-96 md:z-20 bg-[#222222] md:border-l border-zinc-800 flex flex-col justify-between shadow-2xl shrink-0 print:hidden">
           <div>
             <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
               <div className="flex items-center space-x-2">
@@ -640,7 +652,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
               </div>
               <button
                 onClick={() => setIsCopilotOpen(false)}
-                className="text-zinc-400 hover:text-white"
+                className="p-1.5 rounded-lg bg-zinc-800 md:bg-transparent text-zinc-300 hover:text-white"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -823,7 +835,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
 
       {/* Custom Equation Insert / Edit Modal */}
       {mathModal.isOpen && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
           <form
             onSubmit={handleConfirmMath}
             className="w-full max-w-lg bg-[#222222] border border-zinc-700 rounded-xl shadow-2xl p-5 space-y-4"

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import {
   FileText, Upload, LogOut, Plus,
-  Loader2, Sparkles, Pencil, Trash2
+  Loader2, Sparkles, Pencil, Trash2, Menu, X
 } from 'lucide-react'
 import { supabase } from './lib/supabase'
 import { SnapTexEditor } from './components/SnapTexEditor'
@@ -40,6 +40,11 @@ export default function App() {
     setLang(nextLang)
     localStorage.setItem('snaptex_lang', nextLang)
   }
+
+  // Mobile-first sidebar state: open by default on desktop (>= 768px), closed on phone
+  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerWidth >= 768 : true
+  )
 
   const [user, setUser] = useState<any>(null)
   const [authEmail, setAuthEmail] = useState('')
@@ -82,6 +87,12 @@ export default function App() {
 
     return () => subscription.unsubscribe()
   }, [])
+
+  const closeSidebarOnMobile = () => {
+    if (typeof window !== 'undefined' && window.innerWidth < 768) {
+      setIsSidebarOpen(false)
+    }
+  }
 
   const getAuthToken = async (): Promise<string | null> => {
     const { data: { session } } = await supabase.auth.getSession()
@@ -184,6 +195,7 @@ export default function App() {
 
       setDocuments([newDoc, ...documents])
       setCurrentDoc(newDoc)
+      closeSidebarOnMobile()
       fetchHistory(token)
     } catch (err: any) {
       console.error('OCR processing failed:', err)
@@ -430,9 +442,57 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-screen bg-[#191919] overflow-hidden print:h-auto print:overflow-visible print:bg-white">
-      <aside className="w-72 bg-[#202020] border-r border-zinc-800 flex flex-col justify-between print:hidden">
-        <div>
+    <div className="relative flex flex-col md:flex-row h-screen bg-[#191919] overflow-hidden print:h-auto print:overflow-visible print:bg-white">
+      {/* Mobile Top Bar (Hamburger + Quick Upload + Language) */}
+      <header className="flex md:hidden items-center justify-between px-4 py-3 bg-[#202020] border-b border-zinc-800 shrink-0 print:hidden">
+        <div className="flex items-center space-x-2.5">
+          <button
+            onClick={() => setIsSidebarOpen(prev => !prev)}
+            className="p-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg transition-colors"
+            aria-label="Toggle History & Upload Drawer"
+          >
+            {isSidebarOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
+          </button>
+          <div className="flex items-center space-x-1.5">
+            <div className="p-1 bg-rose-600 rounded text-white">
+              <Sparkles className="w-3.5 h-3.5" />
+            </div>
+            <span className="font-bold text-white text-sm tracking-tight">SnapTex AI</span>
+          </div>
+        </div>
+
+        <div className="flex items-center space-x-2">
+          <label className="flex items-center space-x-1 px-2.5 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-medium rounded-lg cursor-pointer">
+            <Upload className="w-3.5 h-3.5" />
+            <span>{lang === 'fr' ? 'Importer' : 'Upload'}</span>
+            <input
+              type="file"
+              accept="image/*,application/pdf"
+              multiple
+              onChange={handleFileUpload}
+              className="hidden"
+              disabled={isProcessing}
+            />
+          </label>
+          <LanguageSwitch />
+        </div>
+      </header>
+
+      {/* Mobile Dark Backdrop when Sidebar Drawer is Open */}
+      {isSidebarOpen && (
+        <div
+          onClick={() => setIsSidebarOpen(false)}
+          className="fixed inset-0 bg-black/60 z-30 md:hidden print:hidden"
+        />
+      )}
+
+      {/* Collapsible History & Upload Sidebar */}
+      <aside
+        className={`fixed inset-y-0 left-0 z-40 w-72 bg-[#202020] border-r border-zinc-800 flex flex-col justify-between transform transition-transform duration-200 ease-out md:static md:translate-x-0 shrink-0 print:hidden ${
+          isSidebarOpen ? 'translate-x-0' : '-translate-x-full hidden md:flex'
+        }`}
+      >
+        <div className="flex flex-col min-h-0 flex-1">
           <div className="flex items-center justify-between px-4 py-4 border-b border-zinc-800">
             <div className="flex items-center space-x-2">
               <div className="p-1.5 bg-rose-600 rounded text-white">
@@ -443,11 +503,21 @@ export default function App() {
             <div className="flex items-center space-x-1.5">
               <LanguageSwitch />
               <button
-                onClick={() => setCurrentDoc(null)}
+                onClick={() => {
+                  setCurrentDoc(null)
+                  closeSidebarOnMobile()
+                }}
                 className="p-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg transition-colors"
                 title={t.newDocument}
               >
                 <Plus className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => setIsSidebarOpen(false)}
+                className="p-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg md:hidden"
+                title="Close"
+              >
+                <X className="w-4 h-4" />
               </button>
             </div>
           </div>
@@ -488,7 +558,7 @@ export default function App() {
             {uploadError && <p className="text-xs text-rose-400 mt-2">{uploadError}</p>}
           </div>
 
-          <div className="overflow-y-auto max-h-[calc(100vh-280px)] px-3 py-2 space-y-1">
+          <div className="overflow-y-auto flex-1 px-3 py-2 space-y-1">
             <div className="px-2 py-1 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">{t.history}</div>
             {documents.map(doc => (
               <div
@@ -496,6 +566,7 @@ export default function App() {
                 onClick={() => {
                   setKeepCopilotOpenOnSwitch(false)
                   setCurrentDoc(doc)
+                  closeSidebarOnMobile()
                 }}
                 className={`group w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors cursor-pointer ${
                   currentDoc?.id === doc.id
@@ -507,7 +578,7 @@ export default function App() {
                   <FileText className="w-4 h-4 shrink-0 text-zinc-500" />
                   <span className="truncate">{doc.title}</span>
                 </div>
-                <div className="flex items-center space-x-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                <div className="flex items-center space-x-1 md:opacity-0 md:group-hover:opacity-100 transition-opacity shrink-0">
                   <button
                     onClick={e => handleRenameDoc(e, doc)}
                     className="p-1 text-zinc-400 hover:text-white rounded hover:bg-zinc-700"
@@ -540,7 +611,8 @@ export default function App() {
         </div>
       </aside>
 
-      <main className="flex-1 p-8 overflow-y-auto print:p-0 print:overflow-visible">
+      {/* Main Editor Area */}
+      <main className="flex-1 p-2 sm:p-4 md:p-8 overflow-y-auto print:p-0 print:overflow-visible">
         {currentDoc ? (
           <SnapTexEditor
             key={currentDoc.id}
@@ -554,12 +626,36 @@ export default function App() {
             onOpenGeneratedDoc={handleOpenGeneratedDoc}
           />
         ) : (
-          <div className="flex flex-col items-center justify-center h-full text-center max-w-md mx-auto">
+          <div className="flex flex-col items-center justify-center h-full text-center max-w-md mx-auto px-4">
             <div className="p-4 bg-[#222] border border-zinc-800 rounded-2xl mb-4 text-rose-500">
               <Sparkles className="w-8 h-8" />
             </div>
             <h2 className="text-xl font-bold text-white mb-2">{t.welcomeTitle}</h2>
             <p className="text-sm text-zinc-400 mb-6">{t.welcomeDesc}</p>
+
+            {/* Direct Mobile Upload Dropzone on Empty State */}
+            <label className="w-full flex flex-col items-center justify-center p-6 border-2 border-dashed border-zinc-700 hover:border-rose-500/60 rounded-2xl cursor-pointer bg-[#202020] transition-all">
+              {isProcessing ? (
+                <div className="flex flex-col items-center space-y-2">
+                  <Loader2 className="w-6 h-6 text-rose-500 animate-spin" />
+                  <span className="text-xs text-zinc-300">{processingLabel || t.transcribingDefault}</span>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center space-y-1.5">
+                  <Upload className="w-6 h-6 text-rose-400" />
+                  <span className="text-sm font-medium text-white">{t.uploadTitle}</span>
+                  <span className="text-xs text-zinc-400">{t.uploadSubtitle}</span>
+                </div>
+              )}
+              <input
+                type="file"
+                accept="image/*,application/pdf"
+                multiple
+                onChange={handleFileUpload}
+                className="hidden"
+                disabled={isProcessing}
+              />
+            </label>
           </div>
         )}
       </main>
