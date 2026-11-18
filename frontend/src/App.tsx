@@ -6,6 +6,7 @@ import {
 import { supabase } from './lib/supabase'
 import { SnapTexEditor } from './components/SnapTexEditor'
 import { translations, type Language } from './lib/i18n'
+import { compressImageForOcr } from './lib/imageCompressor'
 
 interface DocumentItem {
   id: string
@@ -41,7 +42,6 @@ export default function App() {
     localStorage.setItem('snaptex_lang', nextLang)
   }
 
-  // Mobile-first sidebar state: open by default on desktop (>= 768px), closed on phone
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(() =>
     typeof window !== 'undefined' ? window.innerWidth >= 768 : true
   )
@@ -72,7 +72,10 @@ export default function App() {
     }
     link.href =
       "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23e11d48'/%3E%3Cpath d='M16 6l2.4 7.6L26 16l-7.6 2.4L16 26l-2.4-7.6L6 16l7.6-2.4L16 6z' fill='%23ffffff'/%3E%3C/svg%3E"
-  }, [])
+
+    // Wake up Render backend immediately so cold starts don't eat into upload time
+    fetch(`${API_URL}/`).catch(() => {})
+  }, [API_URL])
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -155,25 +158,38 @@ export default function App() {
     setUploadError(null)
     setKeepCopilotOpenOnSwitch(false)
     setProcessingLabel(
-      fileList.length > 1
-        ? t.transcribingMulti(fileList.length)
-        : fileList[0].type === 'application/pdf'
-          ? t.transcribingPdf
-          : t.transcribingDefault
+      lang === 'fr' ? 'Optimisation des images...' : 'Optimizing photos for fast upload...'
     )
+
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => controller.abort(), 90000) // 90s timeout
 
     try {
       const token = await getAuthToken()
       if (!token) throw new Error('Session expired. Please sign in again.')
 
+      // Compress phone camera photos client-side so 4G uploads finish in < 2s
+      const optimizedFiles = await Promise.all(
+        fileList.map(file => compressImageForOcr(file))
+      )
+
+      setProcessingLabel(
+        optimizedFiles.length > 1
+          ? t.transcribingMulti(optimizedFiles.length)
+          : optimizedFiles[0].type === 'application/pdf'
+            ? t.transcribingPdf
+            : t.transcribingDefault
+      )
+
       const formData = new FormData()
-      fileList.forEach(file => formData.append('files', file))
+      optimizedFiles.forEach(file => formData.append('files', file))
       formData.append('aggressive_whitening', String(aggressiveWhitening))
 
       const res = await fetch(`${API_URL}/process-document`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
         body: formData,
+        signal: controller.signal,
       })
 
       if (!res.ok) {
@@ -199,8 +215,17 @@ export default function App() {
       fetchHistory(token)
     } catch (err: any) {
       console.error('OCR processing failed:', err)
-      setUploadError(err.message || 'Failed to process document.')
+      if (err?.name === 'AbortError') {
+        setUploadError(
+          lang === 'fr'
+            ? 'Délai dépassé (90s). Le serveur redémarrait peut-être ou le réseau est lent — réessayez maintenant.'
+            : 'Upload timed out (90s). The server may have been waking up or cellular data was slow — please try again now.'
+        )
+      } else {
+        setUploadError(err.message || 'Failed to process document.')
+      }
     } finally {
+      window.clearTimeout(timeoutId)
       setIsProcessing(false)
       e.target.value = ''
     }
@@ -443,7 +468,7 @@ export default function App() {
 
   return (
     <div className="relative flex flex-col md:flex-row h-screen bg-[#191919] overflow-hidden print:h-auto print:overflow-visible print:bg-white">
-      {/* Mobile Top Bar (Hamburger + Quick Upload + Language) */}
+      {/* Mobile Top Bar */}
       <header className="flex md:hidden items-center justify-between px-4 py-3 bg-[#202020] border-b border-zinc-800 shrink-0 print:hidden">
         <div className="flex items-center space-x-2.5">
           <button
@@ -463,8 +488,8 @@ export default function App() {
 
         <div className="flex items-center space-x-2">
           <label className="flex items-center space-x-1 px-2.5 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-medium rounded-lg cursor-pointer">
-            <Upload className="w-3.5 h-3.5" />
-            <span>{lang === 'fr' ? 'Importer' : 'Upload'}</span>
+            {isProcessing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
+            <span>{isProcessing ? (lang === 'fr' ? 'En cours...' : 'Working...') : (lang === 'fr' ? 'Importer' : 'Upload')}</span>
             <input
               type="file"
               accept="image/*,application/pdf"
@@ -477,6 +502,19 @@ export default function App() {
           <LanguageSwitch />
         </div>
       </header>
+
+      {/* Mobile Upload Status / Error Banner */}
+      {(isProcessing || uploadError) && (
+        <div className="md:hidden px-4 py-2 bg-[#252525] border-b border-zinc-800 text-xs shrink-0 print:hidden">
+          {isProcessing && (
+            <div className="flex items-center space-x-2 text-rose-300">
+              <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+              <span>{processingLabel || t.transcribingDefault}</span>
+            </div>
+          )}
+          {uploadError && <p className="text-rose-400">{uploadError}</p>}
+        </div>
+      )}
 
       {/* Mobile Dark Backdrop when Sidebar Drawer is Open */}
       {isSidebarOpen && (
@@ -633,7 +671,6 @@ export default function App() {
             <h2 className="text-xl font-bold text-white mb-2">{t.welcomeTitle}</h2>
             <p className="text-sm text-zinc-400 mb-6">{t.welcomeDesc}</p>
 
-            {/* Direct Mobile Upload Dropzone on Empty State */}
             <label className="w-full flex flex-col items-center justify-center p-6 border-2 border-dashed border-zinc-700 hover:border-rose-500/60 rounded-2xl cursor-pointer bg-[#202020] transition-all">
               {isProcessing ? (
                 <div className="flex flex-col items-center space-y-2">
