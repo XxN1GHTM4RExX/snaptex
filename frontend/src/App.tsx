@@ -32,6 +32,7 @@ export default function App() {
 
   const [documents, setDocuments] = useState<DocumentItem[]>([])
   const [currentDoc, setCurrentDoc] = useState<DocumentItem | null>(null)
+  const [keepCopilotOpenOnSwitch, setKeepCopilotOpenOnSwitch] = useState(false)
 
   const [isProcessing, setIsProcessing] = useState(false)
   const [processingLabel, setProcessingLabel] = useState('Transcribing STEM Content...')
@@ -40,7 +41,6 @@ export default function App() {
 
   const API_URL = import.meta.env.VITE_API_URL || 'https://snaptex.onrender.com'
 
-  // Check Supabase session on load
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user ?? null)
@@ -112,6 +112,7 @@ export default function App() {
 
     setIsProcessing(true)
     setUploadError(null)
+    setKeepCopilotOpenOnSwitch(false)
     setProcessingLabel(
       fileList.length > 1
         ? `Transcribing ${fileList.length} pages...`
@@ -163,6 +164,19 @@ export default function App() {
       setIsProcessing(false)
       e.target.value = ''
     }
+  }
+
+  // Opens a Copilot-generated Solution File in the editor while keeping the Copilot drawer open
+  const handleOpenGeneratedDoc = (solutionTitle: string, solutionMarkdown: string) => {
+    const newSolutionDoc: DocumentItem = {
+      id: `sol-${Date.now()}`,
+      title: solutionTitle,
+      content: solutionMarkdown,
+      created_at: new Date().toISOString(),
+    }
+    setKeepCopilotOpenOnSwitch(true)
+    setDocuments(prev => [newSolutionDoc, ...prev])
+    setCurrentDoc(newSolutionDoc)
   }
 
   const handleSaveDoc = async (markdown: string) => {
@@ -286,7 +300,6 @@ export default function App() {
     }
   }
 
-  // --- Auth Screen if Not Logged In ---
   if (!user) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-[#191919] px-4">
@@ -342,13 +355,10 @@ export default function App() {
     )
   }
 
-  // --- Main Notion Workspace ---
   return (
     <div className="flex h-screen bg-[#191919] overflow-hidden">
-      {/* Left Sidebar */}
       <aside className="w-72 bg-[#202020] border-r border-zinc-800 flex flex-col justify-between">
         <div>
-          {/* Workspace Title */}
           <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
             <div className="flex items-center space-x-2">
               <div className="p-1.5 bg-rose-600 rounded text-white">
@@ -365,7 +375,6 @@ export default function App() {
             </button>
           </div>
 
-          {/* Upload Section */}
           <div className="p-4 border-b border-zinc-800">
             <label className="flex flex-col items-center justify-center p-4 border-2 border-dashed border-zinc-700 hover:border-rose-500/60 rounded-xl cursor-pointer bg-[#191919] transition-all group">
               {isProcessing ? (
@@ -390,7 +399,6 @@ export default function App() {
               />
             </label>
 
-            {/* Aggressive Whitening Toggle */}
             <div className="flex items-center justify-between mt-3 px-1">
               <span className="text-xs text-zinc-400">Aggressive Whitening</span>
               <input
@@ -403,13 +411,15 @@ export default function App() {
             {uploadError && <p className="text-xs text-rose-400 mt-2">{uploadError}</p>}
           </div>
 
-          {/* Document History List */}
           <div className="overflow-y-auto max-h-[calc(100vh-280px)] px-3 py-2 space-y-1">
             <div className="px-2 py-1 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">History</div>
             {documents.map(doc => (
               <div
                 key={doc.id}
-                onClick={() => setCurrentDoc(doc)}
+                onClick={() => {
+                  setKeepCopilotOpenOnSwitch(false)
+                  setCurrentDoc(doc)
+                }}
                 className={`group w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors cursor-pointer ${
                   currentDoc?.id === doc.id
                     ? 'bg-rose-600/15 text-rose-300 font-medium'
@@ -441,7 +451,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* User Footer */}
         <div className="p-4 border-t border-zinc-800 flex items-center justify-between bg-[#1d1d1d]">
           <span className="text-xs text-zinc-400 truncate max-w-[170px]">{user.email}</span>
           <button
@@ -454,16 +463,17 @@ export default function App() {
         </div>
       </aside>
 
-      {/* Main Workspace Canvas */}
       <main className="flex-1 p-8 overflow-y-auto">
         {currentDoc ? (
           <SnapTexEditor
             key={currentDoc.id}
             initialContent={currentDoc.content}
             title={currentDoc.title}
+            defaultCopilotOpen={keepCopilotOpenOnSwitch}
             onTitleChange={newTitle => setCurrentDoc({ ...currentDoc, title: newTitle })}
             onSave={handleSaveDoc}
             onExportDocx={handleExportDocx}
+            onOpenGeneratedDoc={handleOpenGeneratedDoc}
           />
         ) : (
           <div className="flex flex-col items-center justify-center h-full text-center max-w-md mx-auto">

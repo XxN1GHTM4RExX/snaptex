@@ -13,7 +13,7 @@ import {
   Bold, Italic, Heading1, Heading2, List, ListOrdered,
   Table as TableIcon, Sigma, Download, Save, X, Check,
   Sparkles, ChevronLeft, ChevronRight, BookOpen, Bot, Send, Loader2,
-  Pin, Replace
+  Pin, Replace, FileCheck2, ArrowUpRight
 } from 'lucide-react'
 import { markdownToHtml, htmlToMarkdown } from '../lib/markdownBridge'
 import { supabase } from '../lib/supabase'
@@ -21,9 +21,11 @@ import { supabase } from '../lib/supabase'
 interface SnapTexEditorProps {
   initialContent: string
   title: string
+  defaultCopilotOpen?: boolean
   onTitleChange: (title: string) => void
   onSave: (markdown: string) => void
   onExportDocx: () => void
+  onOpenGeneratedDoc?: (solutionTitle: string, solutionMarkdown: string) => void
 }
 
 interface MathModalState {
@@ -43,9 +45,11 @@ interface TaggedSpot {
 export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
   initialContent,
   title,
+  defaultCopilotOpen = false,
   onTitleChange,
   onSave,
   onExportDocx,
+  onOpenGeneratedDoc,
 }) => {
   const [mathModal, setMathModal] = useState<MathModalState>({
     isOpen: false,
@@ -58,8 +62,8 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
   // Book View, Surgical Tagging & Copilot States
   const [isBookView, setIsBookView] = useState(false)
   const [currentPageIndex, setCurrentPageIndex] = useState(0)
-  const [isCopilotOpen, setIsCopilotOpen] = useState(false)
-  const [copilotMode, setCopilotMode] = useState<'explain' | 'fix_ocr' | 'exercise'>('explain')
+  const [isCopilotOpen, setIsCopilotOpen] = useState(defaultCopilotOpen)
+  const [copilotMode, setCopilotMode] = useState<'explain' | 'fix_ocr' | 'exercise' | 'solution'>('explain')
   const [copilotPrompt, setCopilotPrompt] = useState('')
   const [isCopilotLoading, setIsCopilotLoading] = useState(false)
   const [copilotResponse, setCopilotResponse] = useState<any>(null)
@@ -67,12 +71,10 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
 
   const API_URL = import.meta.env.VITE_API_URL || 'https://snaptex.onrender.com'
 
-  // Split full markdown into pages by '---'
   const pages = useMemo(() => {
     return initialContent.split(/\n\s*---\s*\n/).map(p => p.trim()).filter(Boolean)
   }, [initialContent])
 
-  // Live KaTeX preview inside the equation modal
   useEffect(() => {
     if (!mathModal.isOpen) return
     try {
@@ -127,7 +129,6 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
     },
   })
 
-  // Sync editor content when switching book-view page
   useEffect(() => {
     if (!editor) return
     const contentToLoad = isBookView && pages.length > 0 ? pages[currentPageIndex] : initialContent
@@ -145,20 +146,17 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
   const handleToggleCopilot = () => {
     const nextState = !isCopilotOpen
     setIsCopilotOpen(nextState)
-    // Automatically switch multi-page documents to Book View when opening Copilot
     if (nextState && pages.length > 1) {
       setIsBookView(true)
     }
   }
 
-  // Capture highlighted text OR the entire current block/line under the cursor
   const handleTagSpot = () => {
     const { from, to, $from } = editor.state.selection
     let tagFrom = from
     let tagTo = to
 
     if (from === to) {
-      // Nothing highlighted: lock onto the entire current paragraph/block node
       tagFrom = $from.start($from.depth)
       tagTo = $from.end($from.depth)
     }
@@ -223,7 +221,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
 
   const handleRunCopilot = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!copilotPrompt.trim() && !taggedSpot) return
+    if (!copilotPrompt.trim() && !taggedSpot && copilotMode !== 'solution') return
 
     setIsCopilotLoading(true)
     setCopilotResponse(null)
@@ -237,11 +235,18 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
         ? pages[currentPageIndex]
         : htmlToMarkdown(editor.getHTML())
 
+      let defaultInstruction = copilotPrompt.trim()
+      if (!defaultInstruction) {
+        if (copilotMode === 'solution') {
+          defaultInstruction = 'Solve every exercise and question in this document step-by-step with rigorous mathematical proofs and return the full solution document in solution_markdown.'
+        } else if (taggedSpot) {
+          defaultInstruction = 'Fix any OCR/grammar/LaTeX errors in this exact tagged line and return the clean replacement in suggested_patch.'
+        }
+      }
+
       const effectivePrompt = taggedSpot
-        ? `[TAGGED TARGET LINE/SELECTION]: "${taggedSpot.previewText}"\n\nUser Instruction: ${
-            copilotPrompt.trim() || 'Fix any OCR/grammar/LaTeX errors in this exact tagged line and return the clean replacement in suggested_patch.'
-          }`
-        : copilotPrompt
+        ? `[TAGGED TARGET LINE/SELECTION]: "${taggedSpot.previewText}"\n\nUser Instruction: ${defaultInstruction}`
+        : defaultInstruction
 
       const res = await fetch(`${API_URL}/ai-assist`, {
         method: 'POST',
@@ -250,7 +255,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          full_markdown: initialContent,
+          full_markdown: htmlToMarkdown(editor.getHTML()),
           active_page_content: activePageContent,
           active_page_number: currentPageIndex + 1,
           user_prompt: effectivePrompt,
@@ -295,6 +300,17 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
     }
   }
 
+  const handleOpenSolutionInWorkspace = () => {
+    if (!copilotResponse || typeof copilotResponse !== 'object' || !copilotResponse.solution_markdown) return
+    const solTitle = copilotResponse.solution_title || `Solution — ${title}`
+    if (onOpenGeneratedDoc) {
+      onOpenGeneratedDoc(solTitle, copilotResponse.solution_markdown)
+    } else {
+      onTitleChange(solTitle)
+      editor.commands.setContent(markdownToHtml(copilotResponse.solution_markdown))
+    }
+  }
+
   const handleInsertExplanation = () => {
     if (!copilotResponse) return
     const explanationText = typeof copilotResponse === 'string' ? copilotResponse : copilotResponse.explanation
@@ -312,7 +328,6 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
     <div className="relative flex h-full bg-[#1e1e1e] border border-zinc-800 rounded-xl shadow-2xl overflow-hidden">
       {/* Main Workspace Column */}
       <div className="flex-1 flex flex-col h-full overflow-hidden">
-        {/* Dark-mode KaTeX & TipTap styling */}
         <style>{`
           .snaptex-prose h1 { font-size: 1.75rem; font-weight: 700; margin: 1rem 0 0.5rem; color: #fff; }
           .snaptex-prose h2 { font-size: 1.35rem; font-weight: 600; margin: 0.9rem 0 0.4rem; color: #f4f4f5; }
@@ -480,7 +495,6 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
             </button>
           </div>
 
-          {/* Surgical Spot Tag Button */}
           <button
             onClick={handleTagSpot}
             className={`flex items-center space-x-1.5 px-3 py-1 rounded-lg text-xs font-medium transition-colors border ${
@@ -518,18 +532,19 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
               </button>
             </div>
 
-            <div className="p-3 border-b border-zinc-800 flex space-x-1 bg-[#1c1c1c]">
+            {/* 4 Copilot Mode Tabs */}
+            <div className="p-2.5 border-b border-zinc-800 grid grid-cols-4 gap-1 bg-[#1c1c1c]">
               <button
                 onClick={() => setCopilotMode('explain')}
-                className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                className={`py-1.5 text-[11px] font-medium rounded-md transition-colors ${
                   copilotMode === 'explain' ? 'bg-rose-600 text-white' : 'text-zinc-400 hover:text-white'
                 }`}
               >
-                Explain / Verify
+                Explain
               </button>
               <button
                 onClick={() => setCopilotMode('fix_ocr')}
-                className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                className={`py-1.5 text-[11px] font-medium rounded-md transition-colors ${
                   copilotMode === 'fix_ocr' ? 'bg-rose-600 text-white' : 'text-zinc-400 hover:text-white'
                 }`}
               >
@@ -537,11 +552,19 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
               </button>
               <button
                 onClick={() => setCopilotMode('exercise')}
-                className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                className={`py-1.5 text-[11px] font-medium rounded-md transition-colors ${
                   copilotMode === 'exercise' ? 'bg-rose-600 text-white' : 'text-zinc-400 hover:text-white'
                 }`}
               >
                 Exercises
+              </button>
+              <button
+                onClick={() => setCopilotMode('solution')}
+                className={`py-1.5 text-[11px] font-medium rounded-md transition-colors ${
+                  copilotMode === 'solution' ? 'bg-rose-600 text-white' : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                Solution File
               </button>
             </div>
 
@@ -570,7 +593,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                     onClick={handleTagSpot}
                     className="ml-2 px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-amber-300 rounded font-medium shrink-0"
                   >
-                    + Tag Cursor Line
+                    + Tag Line
                   </button>
                 </div>
               )}
@@ -581,11 +604,39 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
             {isCopilotLoading ? (
               <div className="flex flex-col items-center justify-center h-48 space-y-2 text-zinc-400">
                 <Loader2 className="w-6 h-6 text-rose-500 animate-spin" />
-                <span className="text-xs">Analyzing {taggedSpot ? 'tagged line' : 'page content'}...</span>
+                <span className="text-xs">
+                  {copilotMode === 'solution'
+                    ? 'Writing full worked solution document...'
+                    : `Analyzing ${taggedSpot ? 'tagged line' : 'page content'}...`}
+                </span>
               </div>
             ) : copilotResponse ? (
               <div className="space-y-3 bg-[#181818] p-3.5 rounded-xl border border-zinc-800">
                 <div className="text-xs font-semibold uppercase tracking-wider text-rose-400">Copilot Output</div>
+
+                {/* Clickable Generated Solution File Attachment Card */}
+                {typeof copilotResponse === 'object' && copilotResponse.solution_markdown && (
+                  <button
+                    onClick={handleOpenSolutionInWorkspace}
+                    className="w-full text-left p-3 rounded-xl bg-rose-600/15 hover:bg-rose-600/25 border border-rose-500/40 transition-all group flex items-center justify-between"
+                  >
+                    <div className="flex items-center space-x-2.5 truncate pr-2">
+                      <div className="p-2 bg-rose-600 rounded-lg text-white shrink-0">
+                        <FileCheck2 className="w-4 h-4" />
+                      </div>
+                      <div className="truncate">
+                        <div className="text-xs font-semibold text-white truncate">
+                          {copilotResponse.solution_title || `Solution — ${title}`}
+                        </div>
+                        <div className="text-[10px] text-rose-300">
+                          Click to open in main workspace & keep chatting
+                        </div>
+                      </div>
+                    </div>
+                    <ArrowUpRight className="w-4 h-4 text-rose-300 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform shrink-0" />
+                  </button>
+                )}
+
                 <div className="text-xs leading-relaxed text-zinc-200 whitespace-pre-wrap">
                   {typeof copilotResponse === 'string'
                     ? copilotResponse
@@ -613,20 +664,22 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
 
                 <button
                   onClick={handleInsertExplanation}
-                  className="w-full mt-2 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-medium rounded-lg transition-colors shadow"
+                  className="w-full mt-2 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium rounded-lg transition-colors border border-zinc-700"
                 >
-                  Insert Explanation {taggedSpot ? 'Below Tagged Spot' : 'Into Notes'}
+                  Insert Note {taggedSpot ? 'Below Tagged Spot' : 'Into Document'}
                 </button>
               </div>
             ) : (
               <div className="text-center py-12 text-zinc-500 text-xs">
-                Ask the copilot to explain proofs, check formulas, or generate practice exercises for{' '}
-                {taggedSpot
-                  ? 'your pinned target line'
-                  : isBookView
-                  ? `Page ${currentPageIndex + 1}`
-                  : 'this document'}
-                .
+                {copilotMode === 'solution'
+                  ? 'Click "Generate Solution File" to produce a complete worked Solution File that opens directly in your main editor.'
+                  : `Ask the copilot to explain proofs, fix formulas, or generate practice exercises for ${
+                      taggedSpot
+                        ? 'your pinned target line'
+                        : isBookView
+                        ? `Page ${currentPageIndex + 1}`
+                        : 'this document'
+                    }.`}
               </div>
             )}
           </div>
@@ -637,8 +690,10 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
               value={copilotPrompt}
               onChange={e => setCopilotPrompt(e.target.value)}
               placeholder={
-                taggedSpot
-                  ? 'Optional: describe how to modify the tagged spot (or click Ask Copilot to auto-fix)...'
+                copilotMode === 'solution'
+                  ? 'Optional: specify particular questions to solve (or click Generate Solution File to solve the entire sheet)...'
+                  : taggedSpot
+                  ? 'Optional: describe how to modify the tagged spot...'
                   : copilotMode === 'explain'
                   ? 'e.g. Explain step 2 of this limit derivation...'
                   : copilotMode === 'fix_ocr'
@@ -653,7 +708,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
               className="w-full flex items-center justify-center space-x-1.5 py-2 bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors shadow"
             >
               <Send className="w-3.5 h-3.5" />
-              <span>Ask Copilot</span>
+              <span>{copilotMode === 'solution' ? 'Generate Solution File' : 'Ask Copilot'}</span>
             </button>
           </form>
         </aside>
@@ -720,7 +775,6 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
               />
             </div>
 
-            {/* Live KaTeX Preview Box */}
             <div className="p-4 bg-[#161616] border border-zinc-800 rounded-lg min-h-[64px] flex items-center justify-center overflow-x-auto text-zinc-100">
               <div dangerouslySetInnerHTML={{ __html: previewHtml }} />
             </div>

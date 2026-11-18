@@ -22,7 +22,7 @@ from database import (
     update_transcription_content
 )
 
-app = FastAPI(title="SnapTex API", version="1.3")
+app = FastAPI(title="SnapTex API", version="1.5")
 
 app.add_middleware(
     CORSMiddleware,
@@ -46,6 +46,14 @@ class UpdateTranscriptionRequest(BaseModel):
 class ExportDocxRequest(BaseModel):
     title: str = "SnapTex_Document"
     markdown_content: str
+
+
+class AIAssistRequest(BaseModel):
+    full_markdown: str
+    active_page_content: str | None = None
+    active_page_number: int | None = 1
+    user_prompt: str
+    mode: str = "explain"  # "fix_ocr", "explain", "exercise", "solution"
 
 
 def verify_token(authorization: str = Header(...)):
@@ -79,7 +87,6 @@ def pdf_bytes_to_png_pages(pdf_bytes: bytes, max_pages: int = MAX_PAGES) -> List
     page_images: List[bytes] = []
     for i in range(total_pages):
         page = pdf[i]
-        # Scale=2.5 (~180-200 DPI) gives sharp handwriting & math OCR without blowing RAM
         bitmap = page.render(scale=2.5)
         pil_image = bitmap.to_pil()
         buf = io.BytesIO()
@@ -93,7 +100,7 @@ def pdf_bytes_to_png_pages(pdf_bytes: bytes, max_pages: int = MAX_PAGES) -> List
 
 @app.get("/")
 def read_root():
-    return {"message": "SnapTex API (Batch OCR + Native DOCX Export) is online and healthy!"}
+    return {"message": "SnapTex API (Batch OCR + Native DOCX Export + Surgical AI Copilot) is online and healthy!"}
 
 
 @app.post("/process-document")
@@ -112,7 +119,6 @@ async def process_document(
 
         is_whitening_enabled = aggressive_whitening.lower() in ["true", "1", "yes"]
 
-        # Expand uploaded files into ordered page image byte buffers (max 5 pages total)
         page_buffers: List[bytes] = []
         for upload in files:
             raw_bytes = await upload.read()
@@ -186,6 +192,53 @@ async def process_document(
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 
+@app.post("/ai-assist")
+async def ai_assist(
+    payload: AIAssistRequest,
+    authorization: str = Header(...)
+):
+    """Surgical AI Copilot endpoint with page context, solution file generation, and structured JSON output."""
+    verify_token(authorization)
+
+    try:
+        from google import genai
+
+        client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+        system_instruction = (
+            "You are SnapTex Copilot, an expert university-level STEM assistant. "
+            "You help students audit math/physics proofs, fix OCR LaTeX errors, generate practice exercises, "
+            "and produce complete step-by-step solution documents. "
+            "You must return a valid JSON response with keys: "
+            "'explanation' (concise summary or explanation in Markdown with KaTeX math), "
+            "'suggested_patch' (corrected markdown snippet when editing a tagged line, or null), "
+            "'solution_title' (if mode is 'solution', a clean title like 'Solution - <Topic>', else null), and "
+            "'solution_markdown' (if mode is 'solution', the complete, rigorous step-by-step worked solution "
+            "formatted in Markdown with $...$ and $$...$$ KaTeX math and '---' between pages/sections, else null)."
+        )
+
+        context_prompt = (
+            f"Mode: {payload.mode}\n"
+            f"Active Page Number: {payload.active_page_number}\n"
+            f"Active Page Content:\n{payload.active_page_content or payload.full_markdown}\n\n"
+            f"Full Document Context:\n{payload.full_markdown}\n\n"
+            f"User Request: {payload.user_prompt}"
+        )
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=context_prompt,
+            config={
+                "system_instruction": system_instruction,
+                "response_mime_type": "application/json",
+            },
+        )
+
+        return {"status": "success", "result": response.text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI Copilot failed: {str(e)}")
+
+
 @app.post("/export-docx")
 def export_docx(
     payload: ExportDocxRequest,
@@ -202,7 +255,6 @@ def export_docx(
         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp_file:
             tmp_docx_path = tmp_file.name
 
-        # Pandoc converts Markdown + $...$ / $$...$$ directly into native Word OMML equations
         pypandoc.convert_text(
             md_content,
             "docx",
@@ -215,7 +267,6 @@ def export_docx(
 
     except Exception as pandoc_err:
         print(f"Pandoc DOCX conversion fallback triggered: {pandoc_err}")
-        # Clean fallback using python-docx if Pandoc hits an unusual macro
         doc = Document()
         doc.add_heading(payload.title.strip() or "SnapTex Document", level=1)
         for line in payload.markdown_content.splitlines():
