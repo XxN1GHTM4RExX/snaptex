@@ -17,11 +17,13 @@ import {
 } from 'lucide-react'
 import { markdownToHtml, htmlToMarkdown } from '../lib/markdownBridge'
 import { supabase } from '../lib/supabase'
+import { translations, type Language } from '../lib/i18n'
 import type { ExportFormat } from '../App'
 
 interface SnapTexEditorProps {
   initialContent: string
   title: string
+  lang: Language
   defaultCopilotOpen?: boolean
   onTitleChange: (title: string) => void
   onSave: (markdown: string) => void
@@ -65,12 +67,15 @@ function renderStudentFriendlyHtml(md: string): string {
 export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
   initialContent,
   title,
+  lang,
   defaultCopilotOpen = false,
   onTitleChange,
   onSave,
   onExport,
   onOpenGeneratedDoc,
 }) => {
+  const t = translations[lang]
+
   const [mathModal, setMathModal] = useState<MathModalState>({
     isOpen: false,
     mode: 'insert',
@@ -81,7 +86,6 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false)
   const exportMenuRef = useRef<HTMLDivElement>(null)
 
-  // Book View, Surgical Tagging & Copilot States
   const [isBookView, setIsBookView] = useState(false)
   const [currentPageIndex, setCurrentPageIndex] = useState(0)
   const [isCopilotOpen, setIsCopilotOpen] = useState(defaultCopilotOpen)
@@ -195,7 +199,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
 
     const extractedText = editor.state.doc.textBetween(tagFrom, tagTo, ' ').trim()
     if (!extractedText) {
-      alert('Place your cursor on a line or highlight a formula first to tag it.')
+      alert(t.tagEmptyAlert)
       return
     }
 
@@ -276,9 +280,15 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
       let defaultInstruction = copilotPrompt.trim()
       if (!defaultInstruction) {
         if (copilotMode === 'solution') {
-          defaultInstruction = 'Solve every exercise and question in this document step-by-step with rigorous mathematical proofs and return the full solution document in solution_markdown.'
+          defaultInstruction =
+            lang === 'fr'
+              ? 'Résous étape par étape chaque exercice et question de ce document avec des démonstrations rigoureuses et retourne le corrigé complet dans solution_markdown.'
+              : 'Solve every exercise and question in this document step-by-step with rigorous mathematical proofs and return the full solution document in solution_markdown.'
         } else if (taggedSpot) {
-          defaultInstruction = 'Fix any OCR/grammar/LaTeX errors in this exact tagged line and return the clean replacement in suggested_patch.'
+          defaultInstruction =
+            lang === 'fr'
+              ? 'Corrige toute erreur OCR, de grammaire ou de syntaxe LaTeX sur cette ligne exacte et retourne le remplacement propre dans suggested_patch.'
+              : 'Fix any OCR/grammar/LaTeX errors in this exact tagged line and return the clean replacement in suggested_patch.'
         }
       }
 
@@ -298,6 +308,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
           active_page_number: currentPageIndex + 1,
           user_prompt: effectivePrompt,
           mode: copilotMode,
+          language: lang,
         }),
       })
 
@@ -346,7 +357,8 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
 
   const handleOpenSolutionInWorkspace = () => {
     if (!copilotResponse || typeof copilotResponse !== 'object' || !copilotResponse.solution_markdown) return
-    const solTitle = copilotResponse.solution_title || `Solution — ${title}`
+    const defaultPrefix = lang === 'fr' ? 'Corrigé' : 'Solution'
+    const solTitle = copilotResponse.solution_title || `${defaultPrefix} — ${title}`
     if (onOpenGeneratedDoc) {
       onOpenGeneratedDoc(solTitle, copilotResponse.solution_markdown)
     } else {
@@ -360,13 +372,20 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
     const explanationText = typeof copilotResponse === 'string' ? copilotResponse : copilotResponse.explanation
     if (!explanationText) return
 
+    const notePrefix = lang === 'fr' ? 'Note du Copilote' : 'Copilot Note'
     const insertPos = taggedSpot ? taggedSpot.to : editor.state.selection.to
     editor
       .chain()
       .focus()
-      .insertContentAt(insertPos, `\n\n> **Copilot Note:** ${explanationText}\n\n`)
+      .insertContentAt(insertPos, `\n\n> **${notePrefix}:** ${explanationText}\n\n`)
       .run()
   }
+
+  const emptyTargetLabel = taggedSpot
+    ? t.targetPinned
+    : isBookView
+    ? t.targetPage(currentPageIndex + 1)
+    : t.targetDoc
 
   return (
     <div className="relative flex h-full bg-[#1e1e1e] border border-zinc-800 rounded-xl shadow-2xl overflow-hidden print:border-none print:shadow-none print:bg-white print:h-auto print:overflow-visible">
@@ -417,7 +436,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
             type="text"
             value={title}
             onChange={(e) => onTitleChange(e.target.value)}
-            placeholder="Untitled Document..."
+            placeholder={t.untitledDoc}
             className="bg-transparent text-xl font-bold text-white print:text-black focus:outline-none w-1/3 print:w-full placeholder:text-zinc-600"
           />
 
@@ -431,7 +450,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
               }`}
             >
               <BookOpen className="w-4 h-4 text-rose-400" />
-              <span>{isBookView ? 'Book View ON' : 'Book View'}</span>
+              <span>{isBookView ? t.bookViewOn : t.bookView}</span>
             </button>
 
             <button
@@ -439,7 +458,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
               className="flex items-center space-x-1.5 px-3.5 py-1.5 bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 text-sm font-medium rounded-lg transition-colors border border-rose-500/40"
             >
               <Bot className="w-4 h-4 text-rose-400" />
-              <span>AI Copilot</span>
+              <span>{t.aiCopilot}</span>
             </button>
 
             {/* Multi-Format Export Dropdown */}
@@ -449,20 +468,20 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                 className="flex items-center space-x-1.5 px-3.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-sm font-medium rounded-lg transition-colors border border-zinc-700"
               >
                 <Download className="w-4 h-4 text-rose-400" />
-                <span>Export</span>
+                <span>{t.exportBtn}</span>
                 <ChevronDown className="w-3.5 h-3.5 text-zinc-400" />
               </button>
 
               {isExportMenuOpen && (
-                <div className="absolute right-0 mt-2 w-56 bg-[#242424] border border-zinc-700 rounded-xl shadow-2xl py-1.5 z-50 text-xs">
+                <div className="absolute right-0 mt-2 w-60 bg-[#242424] border border-zinc-700 rounded-xl shadow-2xl py-1.5 z-50 text-xs">
                   <button
                     onClick={() => handleSelectExport('docx')}
                     className="w-full px-3.5 py-2.5 text-left hover:bg-zinc-800 flex items-center space-x-2.5 text-zinc-200"
                   >
                     <FileText className="w-4 h-4 text-blue-400 shrink-0" />
                     <div>
-                      <div className="font-semibold">Microsoft Word (.docx)</div>
-                      <div className="text-[10px] text-zinc-400">Native editable Word equations</div>
+                      <div className="font-semibold">{t.exportDocxTitle}</div>
+                      <div className="text-[10px] text-zinc-400">{t.exportDocxDesc}</div>
                     </div>
                   </button>
                   <button
@@ -471,8 +490,8 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                   >
                     <Printer className="w-4 h-4 text-rose-400 shrink-0" />
                     <div>
-                      <div className="font-semibold">Typeset PDF (.pdf)</div>
-                      <div className="text-[10px] text-zinc-400">Print-ready KaTeX document</div>
+                      <div className="font-semibold">{t.exportPdfTitle}</div>
+                      <div className="text-[10px] text-zinc-400">{t.exportPdfDesc}</div>
                     </div>
                   </button>
                   <button
@@ -481,8 +500,8 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                   >
                     <FileCode2 className="w-4 h-4 text-emerald-400 shrink-0" />
                     <div>
-                      <div className="font-semibold">LaTeX Source (.tex)</div>
-                      <div className="text-[10px] text-zinc-400">Overleaf / TeXstudio ready</div>
+                      <div className="font-semibold">{t.exportTexTitle}</div>
+                      <div className="text-[10px] text-zinc-400">{t.exportTexDesc}</div>
                     </div>
                   </button>
                   <button
@@ -491,8 +510,8 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                   >
                     <Download className="w-4 h-4 text-amber-400 shrink-0" />
                     <div>
-                      <div className="font-semibold">Markdown + Math (.md)</div>
-                      <div className="text-[10px] text-zinc-400">Obsidian / Notion / GitHub</div>
+                      <div className="font-semibold">{t.exportMdTitle}</div>
+                      <div className="text-[10px] text-zinc-400">{t.exportMdDesc}</div>
                     </div>
                   </button>
                 </div>
@@ -504,7 +523,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
               className="flex items-center space-x-1.5 px-4 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-sm font-medium rounded-lg transition-colors shadow-lg shadow-rose-600/20"
             >
               <Save className="w-4 h-4" />
-              <span>Save to History</span>
+              <span>{t.saveToHistory}</span>
             </button>
           </div>
         </div>
@@ -518,17 +537,17 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
               className="flex items-center space-x-1 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 rounded transition-colors"
             >
               <ChevronLeft className="w-3.5 h-3.5" />
-              <span>Previous Page</span>
+              <span>{t.prevPage}</span>
             </button>
             <span className="font-medium text-rose-400">
-              Page {currentPageIndex + 1} of {pages.length}
+              {t.pageOf(currentPageIndex + 1, pages.length)}
             </span>
             <button
               onClick={() => setCurrentPageIndex(prev => Math.min(pages.length - 1, prev + 1))}
               disabled={currentPageIndex === pages.length - 1}
               className="flex items-center space-x-1 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 rounded transition-colors"
             >
-              <span>Next Page</span>
+              <span>{t.nextPage}</span>
               <ChevronRight className="w-3.5 h-3.5" />
             </button>
           </div>
@@ -540,14 +559,12 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
             <button
               onClick={() => editor.chain().focus().toggleBold().run()}
               className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('bold') ? 'bg-zinc-700 text-white' : ''}`}
-              title="Bold"
             >
               <Bold className="w-4 h-4" />
             </button>
             <button
               onClick={() => editor.chain().focus().toggleItalic().run()}
               className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('italic') ? 'bg-zinc-700 text-white' : ''}`}
-              title="Italic"
             >
               <Italic className="w-4 h-4" />
             </button>
@@ -555,14 +572,12 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
             <button
               onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
               className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('heading', { level: 1 }) ? 'bg-zinc-700 text-white' : ''}`}
-              title="Heading 1"
             >
               <Heading1 className="w-4 h-4" />
             </button>
             <button
               onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
               className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('heading', { level: 2 }) ? 'bg-zinc-700 text-white' : ''}`}
-              title="Heading 2"
             >
               <Heading2 className="w-4 h-4" />
             </button>
@@ -570,14 +585,12 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
             <button
               onClick={() => editor.chain().focus().toggleBulletList().run()}
               className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('bulletList') ? 'bg-zinc-700 text-white' : ''}`}
-              title="Bullet List"
             >
               <List className="w-4 h-4" />
             </button>
             <button
               onClick={() => editor.chain().focus().toggleOrderedList().run()}
               className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('orderedList') ? 'bg-zinc-700 text-white' : ''}`}
-              title="Numbered List"
             >
               <ListOrdered className="w-4 h-4" />
             </button>
@@ -585,17 +598,15 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
             <button
               onClick={() => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}
               className="p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors"
-              title="Insert Table"
             >
               <TableIcon className="w-4 h-4" />
             </button>
             <button
               onClick={openInsertMathModal}
               className="flex items-center space-x-1 px-2 py-1 rounded hover:bg-zinc-700 hover:text-white transition-colors text-xs font-medium"
-              title="Insert or Edit LaTeX Equation"
             >
               <Sigma className="w-4 h-4 text-rose-400" />
-              <span>Equation</span>
+              <span>{t.equation}</span>
             </button>
           </div>
 
@@ -606,10 +617,9 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                 ? 'bg-amber-500/20 border-amber-500/60 text-amber-300'
                 : 'bg-zinc-800 hover:bg-zinc-700 border-zinc-700 text-zinc-200'
             }`}
-            title="Click a line or highlight text, then click Tag Spot for surgical AI edits"
           >
             <Pin className="w-3.5 h-3.5 text-amber-400" />
-            <span>{taggedSpot ? 'Spot Tagged' : 'Tag Spot for AI'}</span>
+            <span>{taggedSpot ? t.spotTagged : t.tagSpotForAi}</span>
           </button>
         </div>
 
@@ -626,7 +636,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
             <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
               <div className="flex items-center space-x-2">
                 <Sparkles className="w-4 h-4 text-rose-400" />
-                <h3 className="font-semibold text-white text-sm">SnapTex AI Copilot</h3>
+                <h3 className="font-semibold text-white text-sm">{t.copilotTitle}</h3>
               </div>
               <button
                 onClick={() => setIsCopilotOpen(false)}
@@ -644,7 +654,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                   copilotMode === 'explain' ? 'bg-rose-600 text-white' : 'text-zinc-400 hover:text-white'
                 }`}
               >
-                Explain
+                {t.modeExplain}
               </button>
               <button
                 onClick={() => setCopilotMode('fix_ocr')}
@@ -652,7 +662,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                   copilotMode === 'fix_ocr' ? 'bg-rose-600 text-white' : 'text-zinc-400 hover:text-white'
                 }`}
               >
-                Fix LaTeX
+                {t.modeFixLatex}
               </button>
               <button
                 onClick={() => setCopilotMode('exercise')}
@@ -660,7 +670,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                   copilotMode === 'exercise' ? 'bg-rose-600 text-white' : 'text-zinc-400 hover:text-white'
                 }`}
               >
-                Exercises
+                {t.modeExercises}
               </button>
               <button
                 onClick={() => setCopilotMode('solution')}
@@ -668,7 +678,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                   copilotMode === 'solution' ? 'bg-rose-600 text-white' : 'text-zinc-400 hover:text-white'
                 }`}
               >
-                Solution File
+                {t.modeSolution}
               </button>
             </div>
 
@@ -678,26 +688,25 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                 <div className="flex items-start justify-between gap-2 p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30">
                   <div className="text-[11px] text-amber-200 leading-snug">
                     <span className="font-semibold uppercase tracking-wider text-amber-400 block mb-0.5">
-                      Pinned Target Line:
+                      {t.pinnedTargetLine}
                     </span>
                     <span className="line-clamp-2 italic">"{taggedSpot.previewText}"</span>
                   </div>
                   <button
                     onClick={() => setTaggedSpot(null)}
                     className="text-amber-400/70 hover:text-amber-200 shrink-0"
-                    title="Clear Tagged Spot"
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
                 </div>
               ) : (
                 <div className="flex items-center justify-between text-[11px] text-zinc-400">
-                  <span>Click any line in the editor to pin an exact edit spot.</span>
+                  <span>{t.pinHint}</span>
                   <button
                     onClick={handleTagSpot}
                     className="ml-2 px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-amber-300 rounded font-medium shrink-0"
                   >
-                    + Tag Line
+                    {t.tagLineBtn}
                   </button>
                 </div>
               )}
@@ -709,16 +718,13 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
               <div className="flex flex-col items-center justify-center h-48 space-y-2 text-zinc-400">
                 <Loader2 className="w-6 h-6 text-rose-500 animate-spin" />
                 <span className="text-xs">
-                  {copilotMode === 'solution'
-                    ? 'Writing full worked solution document...'
-                    : `Analyzing ${taggedSpot ? 'tagged line' : 'page content'}...`}
+                  {copilotMode === 'solution' ? t.loadingSolution : t.loadingAnalyze(Boolean(taggedSpot))}
                 </span>
               </div>
             ) : copilotResponse ? (
               <div className="space-y-3 bg-[#181818] p-3.5 rounded-xl border border-zinc-800">
-                <div className="text-xs font-semibold uppercase tracking-wider text-rose-400">Copilot Output</div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-rose-400">{t.copilotOutput}</div>
 
-                {/* Clickable Generated Solution File Attachment Card */}
                 {typeof copilotResponse === 'object' && copilotResponse.solution_markdown && (
                   <button
                     onClick={handleOpenSolutionInWorkspace}
@@ -730,18 +736,15 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                       </div>
                       <div className="truncate">
                         <div className="text-xs font-semibold text-white truncate">
-                          {copilotResponse.solution_title || `Solution — ${title}`}
+                          {copilotResponse.solution_title || `${lang === 'fr' ? 'Corrigé' : 'Solution'} — ${title}`}
                         </div>
-                        <div className="text-[10px] text-rose-300">
-                          Click to open rendered Solution File in editor
-                        </div>
+                        <div className="text-[10px] text-rose-300">{t.openSolutionSub}</div>
                       </div>
                     </div>
                     <ArrowUpRight className="w-4 h-4 text-rose-300 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform shrink-0" />
                   </button>
                 )}
 
-                {/* KaTeX-Rendered Explanation */}
                 <div
                   className="snaptex-prose text-xs leading-relaxed text-zinc-200 [&>p]:my-1.5"
                   dangerouslySetInnerHTML={{
@@ -753,11 +756,10 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                   }}
                 />
 
-                {/* Suggested Surgical Patch Preview */}
                 {typeof copilotResponse === 'object' && copilotResponse.suggested_patch && (
                   <div className="p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 space-y-2">
                     <div className="text-[10px] font-semibold uppercase tracking-wider text-emerald-400">
-                      Proposed Replacement
+                      {t.proposedReplacement}
                     </div>
                     <div
                       className="snaptex-prose text-xs text-emerald-100"
@@ -770,7 +772,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                       className="w-full flex items-center justify-center space-x-1.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium rounded-lg transition-colors"
                     >
                       <Replace className="w-3.5 h-3.5" />
-                      <span>{taggedSpot ? 'Replace Tagged Spot' : 'Insert Patch'}</span>
+                      <span>{taggedSpot ? t.replaceTaggedSpot : t.insertPatch}</span>
                     </button>
                   </div>
                 )}
@@ -779,20 +781,12 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                   onClick={handleInsertExplanation}
                   className="w-full mt-2 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium rounded-lg transition-colors border border-zinc-700"
                 >
-                  Insert Note {taggedSpot ? 'Below Tagged Spot' : 'Into Document'}
+                  {taggedSpot ? t.insertNoteBelow : t.insertNoteDoc}
                 </button>
               </div>
             ) : (
               <div className="text-center py-12 text-zinc-500 text-xs">
-                {copilotMode === 'solution'
-                  ? 'Click "Generate Solution File" to produce a complete worked Solution File that opens directly in your main editor.'
-                  : `Ask the copilot to explain proofs, fix formulas, or generate practice exercises for ${
-                      taggedSpot
-                        ? 'your pinned target line'
-                        : isBookView
-                        ? `Page ${currentPageIndex + 1}`
-                        : 'this document'
-                    }.`}
+                {copilotMode === 'solution' ? t.emptySolutionHint : t.emptyDefaultHint(emptyTargetLabel)}
               </div>
             )}
           </div>
@@ -804,14 +798,14 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
               onChange={e => setCopilotPrompt(e.target.value)}
               placeholder={
                 copilotMode === 'solution'
-                  ? 'Optional: specify particular questions to solve (or click Generate Solution File to solve the entire sheet)...'
+                  ? t.placeholderSolution
                   : taggedSpot
-                  ? 'Optional: describe how to modify the tagged spot...'
+                  ? t.placeholderTagged
                   : copilotMode === 'explain'
-                  ? 'e.g. Explain step 2 of this limit derivation...'
+                  ? t.placeholderExplain
                   : copilotMode === 'fix_ocr'
-                  ? 'e.g. Fix any broken LaTeX fraction brackets...'
-                  : 'e.g. Create 3 practice problems based on this page...'
+                  ? t.placeholderFix
+                  : t.placeholderExercise
               }
               className="w-full px-3 py-2 bg-[#161616] border border-zinc-700 rounded-lg text-xs text-white focus:outline-none focus:border-rose-500 resize-none"
             />
@@ -821,7 +815,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
               className="w-full flex items-center justify-center space-x-1.5 py-2 bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors shadow"
             >
               <Send className="w-3.5 h-3.5" />
-              <span>{copilotMode === 'solution' ? 'Generate Solution File' : 'Ask Copilot'}</span>
+              <span>{copilotMode === 'solution' ? t.generateSolutionBtn : t.askCopilotBtn}</span>
             </button>
           </form>
         </aside>
@@ -836,7 +830,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
           >
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold text-white">
-                {mathModal.mode === 'edit' ? 'Edit LaTeX Equation' : 'Insert LaTeX Equation'}
+                {mathModal.mode === 'edit' ? t.editEquationTitle : t.insertEquationTitle}
               </h3>
               <button
                 type="button"
@@ -858,7 +852,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                       : 'bg-zinc-800 text-zinc-400 hover:text-white'
                   }`}
                 >
-                  Inline ($...$)
+                  {t.inlineMath}
                 </button>
                 <button
                   type="button"
@@ -869,14 +863,14 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                       : 'bg-zinc-800 text-zinc-400 hover:text-white'
                   }`}
                 >
-                  Display Block ($$...$$)
+                  {t.displayBlockMath}
                 </button>
               </div>
             )}
 
             <div>
               <label className="block text-[11px] uppercase tracking-wider text-zinc-400 mb-1">
-                LaTeX Expression
+                {t.latexExpression}
               </label>
               <textarea
                 autoFocus
@@ -898,14 +892,14 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                 onClick={() => setMathModal({ ...mathModal, isOpen: false })}
                 className="px-3.5 py-1.5 text-xs font-medium text-zinc-300 bg-zinc-800 hover:bg-zinc-700 rounded-lg"
               >
-                Cancel
+                {t.cancel}
               </button>
               <button
                 type="submit"
                 className="flex items-center space-x-1.5 px-4 py-1.5 text-xs font-medium text-white bg-rose-600 hover:bg-rose-500 rounded-lg"
               >
                 <Check className="w-3.5 h-3.5" />
-                <span>{mathModal.mode === 'edit' ? 'Update Equation' : 'Insert Equation'}</span>
+                <span>{mathModal.mode === 'edit' ? t.updateEquation : t.insertEquation}</span>
               </button>
             </div>
           </form>

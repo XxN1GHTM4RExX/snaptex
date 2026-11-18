@@ -25,7 +25,7 @@ from database import (
     update_transcription_content
 )
 
-app = FastAPI(title="SnapTex API", version="1.9")
+app = FastAPI(title="SnapTex API", version="2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -58,6 +58,7 @@ class AIAssistRequest(BaseModel):
     active_page_number: int | None = 1
     user_prompt: str
     mode: str = "explain"  # "fix_ocr", "explain", "exercise", "solution"
+    language: str = "en"   # "en" or "fr"
 
 
 def verify_token(authorization: str = Header(...)):
@@ -219,7 +220,7 @@ def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> s
 
 @app.get("/")
 def read_root():
-    return {"message": "SnapTex API (Batch OCR + Multi-Format Export + Pooled AI Copilot) is online and healthy!"}
+    return {"message": "SnapTex API (Batch OCR + Bilingual EN/FR + Multi-Format Export + Pooled AI Copilot) is online!"}
 
 
 @app.post("/process-document")
@@ -320,19 +321,24 @@ async def ai_assist(
     verify_token(authorization)
 
     try:
+        lang_label = "French (Français)" if payload.language.lower().startswith("fr") else "English"
+        title_example = "Corrigé - <Sujet>" if lang_label.startswith("French") else "Solution - <Topic>"
+
         system_instruction = (
             "You are SnapTex Copilot, an expert university-level STEM assistant. "
             "You help students audit math/physics proofs, fix OCR LaTeX errors, generate practice exercises, "
             "and produce complete step-by-step solution documents. "
+            f"IMPORTANT: Write ALL natural-language explanations, headings, solution titles, and worked solutions strictly in {lang_label}. "
             "You MUST return strictly valid JSON with exact keys: "
             "'explanation' (concise summary or explanation in Markdown with KaTeX math), "
             "'suggested_patch' (corrected markdown snippet when editing a tagged line, or null), "
-            "'solution_title' (if mode is 'solution', a clean title like 'Solution - <Topic>', else null), and "
+            f"'solution_title' (if mode is 'solution', a clean title like '{title_example}', else null), and "
             "'solution_markdown' (if mode is 'solution', the complete, rigorous step-by-step worked solution "
             "formatted in Markdown with $...$ and $$...$$ KaTeX math and '---' between pages/sections, else null)."
         )
 
         context_prompt = (
+            f"Preferred Response Language: {lang_label}\n"
             f"Mode: {payload.mode}\n"
             f"Active Page Number: {payload.active_page_number}\n"
             f"Active Page Content:\n{payload.active_page_content or payload.full_markdown}\n\n"

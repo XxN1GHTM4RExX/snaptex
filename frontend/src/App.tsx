@@ -5,6 +5,7 @@ import {
 } from 'lucide-react'
 import { supabase } from './lib/supabase'
 import { SnapTexEditor } from './components/SnapTexEditor'
+import { translations, type Language } from './lib/i18n'
 
 interface DocumentItem {
   id: string
@@ -27,6 +28,19 @@ function formatApiError(errData: any, fallback: string): string {
 }
 
 export default function App() {
+  const [lang, setLang] = useState<Language>(() => {
+    const saved = localStorage.getItem('snaptex_lang')
+    if (saved === 'fr' || saved === 'en') return saved
+    return navigator.language?.toLowerCase().startsWith('fr') ? 'fr' : 'en'
+  })
+
+  const t = translations[lang]
+
+  const toggleLanguage = (nextLang: Language) => {
+    setLang(nextLang)
+    localStorage.setItem('snaptex_lang', nextLang)
+  }
+
   const [user, setUser] = useState<any>(null)
   const [authEmail, setAuthEmail] = useState('')
   const [authPassword, setAuthPassword] = useState('')
@@ -37,7 +51,7 @@ export default function App() {
   const [keepCopilotOpenOnSwitch, setKeepCopilotOpenOnSwitch] = useState(false)
 
   const [isProcessing, setIsProcessing] = useState(false)
-  const [processingLabel, setProcessingLabel] = useState('Transcribing STEM Content...')
+  const [processingLabel, setProcessingLabel] = useState('')
   const [aggressiveWhitening, setAggressiveWhitening] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
 
@@ -104,7 +118,7 @@ export default function App() {
     if (isSignUp) {
       const { error } = await supabase.auth.signUp({ email: authEmail, password: authPassword })
       if (error) alert(error.message)
-      else alert('Check your email for confirmation link!')
+      else alert(lang === 'fr' ? 'Vérifiez votre boîte e-mail pour confirmer votre compte !' : 'Check your email for confirmation link!')
     } else {
       const { error } = await supabase.auth.signInWithPassword({ email: authEmail, password: authPassword })
       if (error) alert(error.message)
@@ -117,7 +131,11 @@ export default function App() {
 
     const fileList = Array.from(selectedFiles)
     if (fileList.length > 5) {
-      setUploadError('Maximum 5 images or 1 PDF (up to 5 pages) allowed per upload.')
+      setUploadError(
+        lang === 'fr'
+          ? 'Maximum 5 images ou 1 PDF (jusqu’à 5 pages) autorisés par import.'
+          : 'Maximum 5 images or 1 PDF (up to 5 pages) allowed per upload.'
+      )
       e.target.value = ''
       return
     }
@@ -127,10 +145,10 @@ export default function App() {
     setKeepCopilotOpenOnSwitch(false)
     setProcessingLabel(
       fileList.length > 1
-        ? `Transcribing ${fileList.length} pages...`
+        ? t.transcribingMulti(fileList.length)
         : fileList[0].type === 'application/pdf'
-          ? 'Rendering & transcribing PDF pages...'
-          : 'Transcribing STEM Content...'
+          ? t.transcribingPdf
+          : t.transcribingDefault
     )
 
     try {
@@ -214,7 +232,7 @@ export default function App() {
       const updated = { ...currentDoc, content: markdown }
       setCurrentDoc(updated)
       setDocuments(documents.map(d => d.id === updated.id ? updated : d))
-      alert('Saved to Supabase!')
+      alert(t.savedAlert)
     } catch (err: any) {
       console.error('Save failed:', err)
       alert(err.message || 'Error saving document.')
@@ -223,7 +241,7 @@ export default function App() {
 
   const handleRenameDoc = async (e: React.MouseEvent, doc: DocumentItem) => {
     e.stopPropagation()
-    const newTitle = window.prompt('Rename document:', doc.title)?.trim()
+    const newTitle = window.prompt(t.renamePrompt, doc.title)?.trim()
     if (!newTitle || newTitle === doc.title) return
 
     try {
@@ -251,7 +269,7 @@ export default function App() {
 
   const handleDeleteDoc = async (e: React.MouseEvent, docId: string) => {
     e.stopPropagation()
-    if (!window.confirm('Delete this transcription permanently?')) return
+    if (!window.confirm(t.deleteConfirm)) return
 
     try {
       const token = await getAuthToken()
@@ -274,7 +292,6 @@ export default function App() {
   const handleExportDocument = async (format: ExportFormat, latestMarkdown: string) => {
     if (!currentDoc) return
 
-    // 1. Instant client-side Markdown (.md) download
     if (format === 'md') {
       const mdFile = `# ${currentDoc.title}\n\n${latestMarkdown}`
       const blob = new Blob([mdFile], { type: 'text/markdown;charset=utf-8' })
@@ -289,13 +306,11 @@ export default function App() {
       return
     }
 
-    // 2. Typeset Print-to-PDF (preserves exact KaTeX fonts & diagrams cleanly)
     if (format === 'pdf') {
       window.print()
       return
     }
 
-    // 3. Backend Pandoc conversion for .docx and .tex
     try {
       const token = await getAuthToken()
       if (!token) throw new Error('Session expired. Please sign in again.')
@@ -333,20 +348,46 @@ export default function App() {
     }
   }
 
+  const LanguageSwitch = () => (
+    <div className="inline-flex items-center bg-[#161616] border border-zinc-700 rounded-lg p-0.5 text-[11px] font-semibold">
+      <button
+        type="button"
+        onClick={() => toggleLanguage('en')}
+        className={`px-2 py-0.5 rounded-md transition-colors ${
+          lang === 'en' ? 'bg-rose-600 text-white' : 'text-zinc-400 hover:text-white'
+        }`}
+      >
+        EN
+      </button>
+      <button
+        type="button"
+        onClick={() => toggleLanguage('fr')}
+        className={`px-2 py-0.5 rounded-md transition-colors ${
+          lang === 'fr' ? 'bg-rose-600 text-white' : 'text-zinc-400 hover:text-white'
+        }`}
+      >
+        FR
+      </button>
+    </div>
+  )
+
   if (!user) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-[#191919] px-4">
         <div className="w-full max-w-md p-8 bg-[#222222] border border-zinc-800 rounded-2xl shadow-2xl">
-          <div className="flex items-center space-x-2 mb-6">
-            <div className="p-2 bg-rose-600 rounded-lg text-white">
-              <Sparkles className="w-6 h-6" />
+          <div className="flex items-center justify-between mb-6">
+            <div className="flex items-center space-x-2">
+              <div className="p-2 bg-rose-600 rounded-lg text-white">
+                <Sparkles className="w-6 h-6" />
+              </div>
+              <h1 className="text-2xl font-bold text-white tracking-tight">{t.workspaceTitle}</h1>
             </div>
-            <h1 className="text-2xl font-bold text-white tracking-tight">SnapTex Workspace</h1>
+            <LanguageSwitch />
           </div>
 
           <form onSubmit={handleAuth} className="space-y-4">
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">Email</label>
+              <label className="block text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">{t.email}</label>
               <input
                 type="email"
                 required
@@ -357,7 +398,7 @@ export default function App() {
               />
             </div>
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">Password</label>
+              <label className="block text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">{t.password}</label>
               <input
                 type="password"
                 required
@@ -371,7 +412,7 @@ export default function App() {
               type="submit"
               className="w-full py-2.5 bg-rose-600 hover:bg-rose-500 text-white font-medium rounded-lg transition-colors shadow-lg shadow-rose-600/20"
             >
-              {isSignUp ? 'Create Account' : 'Sign In'}
+              {isSignUp ? t.createAccount : t.signIn}
             </button>
           </form>
 
@@ -380,7 +421,7 @@ export default function App() {
               onClick={() => setIsSignUp(!isSignUp)}
               className="text-sm text-zinc-400 hover:text-white transition-colors"
             >
-              {isSignUp ? 'Already have an account? Sign In' : "Don't have an account? Sign Up"}
+              {isSignUp ? t.alreadyHaveAccount : t.dontHaveAccount}
             </button>
           </div>
         </div>
@@ -392,20 +433,23 @@ export default function App() {
     <div className="flex h-screen bg-[#191919] overflow-hidden print:h-auto print:overflow-visible print:bg-white">
       <aside className="w-72 bg-[#202020] border-r border-zinc-800 flex flex-col justify-between print:hidden">
         <div>
-          <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
+          <div className="flex items-center justify-between px-4 py-4 border-b border-zinc-800">
             <div className="flex items-center space-x-2">
               <div className="p-1.5 bg-rose-600 rounded text-white">
                 <Sparkles className="w-4 h-4" />
               </div>
-              <span className="font-bold text-white tracking-tight">SnapTex AI</span>
+              <span className="font-bold text-white tracking-tight text-sm">SnapTex AI</span>
             </div>
-            <button
-              onClick={() => setCurrentDoc(null)}
-              className="p-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg transition-colors"
-              title="New Document"
-            >
-              <Plus className="w-4 h-4" />
-            </button>
+            <div className="flex items-center space-x-1.5">
+              <LanguageSwitch />
+              <button
+                onClick={() => setCurrentDoc(null)}
+                className="p-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg transition-colors"
+                title={t.newDocument}
+              >
+                <Plus className="w-4 h-4" />
+              </button>
+            </div>
           </div>
 
           <div className="p-4 border-b border-zinc-800">
@@ -413,13 +457,13 @@ export default function App() {
               {isProcessing ? (
                 <div className="flex flex-col items-center space-y-2 py-2">
                   <Loader2 className="w-6 h-6 text-rose-500 animate-spin" />
-                  <span className="text-xs text-zinc-400 text-center">{processingLabel}</span>
+                  <span className="text-xs text-zinc-400 text-center">{processingLabel || t.transcribingDefault}</span>
                 </div>
               ) : (
                 <div className="flex flex-col items-center space-y-1 text-center">
                   <Upload className="w-5 h-5 text-zinc-400 group-hover:text-rose-400 transition-colors" />
-                  <span className="text-xs font-medium text-zinc-300">Upload STEM Pages / PDF</span>
-                  <span className="text-[10px] text-zinc-500">Up to 5 images or 5-page PDF</span>
+                  <span className="text-xs font-medium text-zinc-300">{t.uploadTitle}</span>
+                  <span className="text-[10px] text-zinc-500">{t.uploadSubtitle}</span>
                 </div>
               )}
               <input
@@ -433,7 +477,7 @@ export default function App() {
             </label>
 
             <div className="flex items-center justify-between mt-3 px-1">
-              <span className="text-xs text-zinc-400">Aggressive Whitening</span>
+              <span className="text-xs text-zinc-400">{t.aggressiveWhitening}</span>
               <input
                 type="checkbox"
                 checked={aggressiveWhitening}
@@ -445,7 +489,7 @@ export default function App() {
           </div>
 
           <div className="overflow-y-auto max-h-[calc(100vh-280px)] px-3 py-2 space-y-1">
-            <div className="px-2 py-1 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">History</div>
+            <div className="px-2 py-1 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">{t.history}</div>
             {documents.map(doc => (
               <div
                 key={doc.id}
@@ -467,14 +511,14 @@ export default function App() {
                   <button
                     onClick={e => handleRenameDoc(e, doc)}
                     className="p-1 text-zinc-400 hover:text-white rounded hover:bg-zinc-700"
-                    title="Rename"
+                    title={t.rename}
                   >
                     <Pencil className="w-3.5 h-3.5" />
                   </button>
                   <button
                     onClick={e => handleDeleteDoc(e, doc.id)}
                     className="p-1 text-zinc-400 hover:text-rose-400 rounded hover:bg-zinc-700"
-                    title="Delete"
+                    title={t.delete}
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
@@ -489,7 +533,7 @@ export default function App() {
           <button
             onClick={() => supabase.auth.signOut()}
             className="p-1.5 text-zinc-400 hover:text-rose-400 transition-colors rounded-lg hover:bg-zinc-800"
-            title="Sign Out"
+            title={t.signOut}
           >
             <LogOut className="w-4 h-4" />
           </button>
@@ -502,6 +546,7 @@ export default function App() {
             key={currentDoc.id}
             initialContent={currentDoc.content}
             title={currentDoc.title}
+            lang={lang}
             defaultCopilotOpen={keepCopilotOpenOnSwitch}
             onTitleChange={newTitle => setCurrentDoc({ ...currentDoc, title: newTitle })}
             onSave={handleSaveDoc}
@@ -513,10 +558,8 @@ export default function App() {
             <div className="p-4 bg-[#222] border border-zinc-800 rounded-2xl mb-4 text-rose-500">
               <Sparkles className="w-8 h-8" />
             </div>
-            <h2 className="text-xl font-bold text-white mb-2">Welcome to SnapTex Workspace</h2>
-            <p className="text-sm text-zinc-400 mb-6">
-              Upload up to 5 handwritten math notes, circuit diagrams, or a 5-page PDF on the left to transcribe and edit them in your live Notion-style editor.
-            </p>
+            <h2 className="text-xl font-bold text-white mb-2">{t.welcomeTitle}</h2>
+            <p className="text-sm text-zinc-400 mb-6">{t.welcomeDesc}</p>
           </div>
         )}
       </main>
