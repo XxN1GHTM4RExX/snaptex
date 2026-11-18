@@ -1,482 +1,361 @@
-import React, { useState, useEffect } from 'react'
-import {
-  FileText, Upload, LogOut, Plus,
-  Loader2, Sparkles, Pencil, Trash2
-} from 'lucide-react'
-import { supabase } from './lib/supabase'
-import { SnapTexEditor } from './components/SnapTexEditor'
+import io
+import os
+import re
+import tempfile
+from typing import List
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from supabase import create_client
+import pypdfium2 as pdfium
+import pypandoc
+from docx import Document
 
-interface DocumentItem {
-  id: string
-  title: string
-  content: string
-  created_at: string
-}
+from ocr_engine import process_image_with_gemini
+from blur_detector import calculate_blur_score
+from database import (
+    save_transcription,
+    fetch_recent_transcriptions,
+    get_supabase_client,
+    update_transcription_filename,
+    update_transcription_content
+)
 
-function formatApiError(errData: any, fallback: string): string {
-  if (!errData?.detail) return fallback
-  if (typeof errData.detail === 'string') return errData.detail
-  if (Array.isArray(errData.detail)) {
-    return errData.detail
-      .map((item: any) => item?.msg || JSON.stringify(item))
-      .join(', ')
-  }
-  return JSON.stringify(errData.detail)
-}
+app = FastAPI(title="SnapTex API", version="1.4")
 
-export default function App() {
-  const [user, setUser] = useState<any>(null)
-  const [authEmail, setAuthEmail] = useState('')
-  const [authPassword, setAuthPassword] = useState('')
-  const [isSignUp, setIsSignUp] = useState(false)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-  const [documents, setDocuments] = useState<DocumentItem[]>([])
-  const [currentDoc, setCurrentDoc] = useState<DocumentItem | null>(null)
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-  const [isProcessing, setIsProcessing] = useState(false)
-  const [processingLabel, setProcessingLabel] = useState('Transcribing STEM Content...')
-  const [aggressiveWhitening, setAggressiveWhitening] = useState(false)
-  const [uploadError, setUploadError] = useState<string | null>(null)
+MAX_PAGES = 5
 
-  const API_URL = import.meta.env.VITE_API_URL || 'https://snaptex.onrender.com'
 
-  // Check Supabase session on load
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null)
-      if (session?.access_token) fetchHistory(session.access_token)
-    })
+class UpdateTranscriptionRequest(BaseModel):
+    markdown_content: str
+    filename: str | None = None
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null)
-      if (session?.access_token) fetchHistory(session.access_token)
-    })
 
-    return () => subscription.unsubscribe()
-  }, [])
+class ExportDocxRequest(BaseModel):
+    title: str = "SnapTex_Document"
+    markdown_content: str
 
-  const getAuthToken = async (): Promise<string | null> => {
-    const { data: { session } } = await supabase.auth.getSession()
-    return session?.access_token ?? null
-  }
 
-  const fetchHistory = async (providedToken?: string) => {
-    try {
-      const token = providedToken || await getAuthToken()
-      if (!token) return
+class AIAssistRequest(BaseModel):
+    full_markdown: str
+    active_page_content: str | None = None
+    active_page_number: int | None = 1
+    user_prompt: str
+    mode: str = "explain"  # "fix_ocr", "explain", "exercise"
 
-      const res = await fetch(`${API_URL}/history`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      })
 
-      if (res.ok) {
-        const data = await res.json()
-        const rawList = data.history || data.documents || data || []
-        const formatted: DocumentItem[] = rawList.map((item: any) => ({
-          id: String(item.id),
-          title: item.filename || item.title || 'Untitled Document',
-          content: item.markdown_content || item.content || '',
-          created_at: item.created_at || new Date().toISOString(),
-        }))
-        setDocuments(formatted)
-      }
-    } catch (err) {
-      console.error('Failed to load history:', err)
-    }
-  }
+def verify_token(authorization: str = Header(...)):
+    """Extracts and verifies the user JWT token from the Authorization header."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header.")
 
-  const handleAuth = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (isSignUp) {
-      const { error } = await supabase.auth.signUp({ email: authEmail, password: authPassword })
-      if (error) alert(error.message)
-      else alert('Check your email for confirmation link!')
-    } else {
-      const { error } = await supabase.auth.signInWithPassword({ email: authEmail, password: authPassword })
-      if (error) alert(error.message)
-    }
-  }
+    token = authorization.split("Bearer ")[1]
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const selectedFiles = e.target.files
-    if (!selectedFiles || selectedFiles.length === 0) return
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        user_response = supabase.auth.get_user(token)
+        if not user_response or not user_response.user:
+            raise HTTPException(status_code=401, detail="Invalid token or user session expired.")
+        return {"token": token, "user_id": user_response.user.id}
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Authentication error: {str(e)}")
 
-    const fileList = Array.from(selectedFiles)
-    if (fileList.length > 5) {
-      setUploadError('Maximum 5 images or 1 PDF (up to 5 pages) allowed per upload.')
-      e.target.value = ''
-      return
-    }
 
-    setIsProcessing(true)
-    setUploadError(null)
-    setProcessingLabel(
-      fileList.length > 1
-        ? `Transcribing ${fileList.length} pages...`
-        : fileList[0].type === 'application/pdf'
-          ? 'Rendering & transcribing PDF pages...'
-          : 'Transcribing STEM Content...'
+def pdf_bytes_to_png_pages(pdf_bytes: bytes, max_pages: int = MAX_PAGES) -> List[bytes]:
+    """Renders up to `max_pages` of a PDF into high-res PNG byte buffers."""
+    pdf = pdfium.PdfDocument(pdf_bytes)
+    total_pages = len(pdf)
+    if total_pages > max_pages:
+        pdf.close()
+        raise HTTPException(
+            status_code=400,
+            detail=f"PDF has {total_pages} pages. Maximum allowed is {max_pages} pages per upload."
+        )
+
+    page_images: List[bytes] = []
+    for i in range(total_pages):
+        page = pdf[i]
+        bitmap = page.render(scale=2.5)
+        pil_image = bitmap.to_pil()
+        buf = io.BytesIO()
+        pil_image.save(buf, format="PNG")
+        page_images.append(buf.getvalue())
+        page.close()
+
+    pdf.close()
+    return page_images
+
+
+@app.get("/")
+def read_root():
+    return {"message": "SnapTex API (Batch OCR + Native DOCX Export + AI Copilot) is online and healthy!"}
+
+
+@app.post("/process-document")
+async def process_document(
+    files: List[UploadFile] = File(...),
+    aggressive_whitening: str = Form("false"),
+    authorization: str = Header(...)
+):
+    try:
+        auth_data = verify_token(authorization)
+        token = auth_data["token"]
+        user_id = auth_data["user_id"]
+
+        if not files:
+            raise HTTPException(status_code=400, detail="No files uploaded.")
+
+        is_whitening_enabled = aggressive_whitening.lower() in ["true", "1", "yes"]
+
+        page_buffers: List[bytes] = []
+        for upload in files:
+            raw_bytes = await upload.read()
+            content_type = (upload.content_type or "").lower()
+            filename_lower = (upload.filename or "").lower()
+
+            if content_type == "application/pdf" or filename_lower.endswith(".pdf"):
+                if len(files) > 1:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Please upload either 1 PDF (up to 5 pages) or up to 5 images at once."
+                    )
+                page_buffers.extend(pdf_bytes_to_png_pages(raw_bytes, max_pages=MAX_PAGES))
+            else:
+                page_buffers.append(raw_bytes)
+
+        if len(page_buffers) > MAX_PAGES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"You uploaded {len(page_buffers)} pages. Maximum allowed is {MAX_PAGES} pages per batch."
+            )
+
+        stitched_latex_parts: List[str] = []
+        stitched_text_parts: List[str] = []
+        blur_scores: List[float] = []
+
+        for idx, img_bytes in enumerate(page_buffers, start=1):
+            score = calculate_blur_score(img_bytes)
+            blur_scores.append(score)
+
+            ocr_result = process_image_with_gemini(img_bytes, aggressive_whitening=is_whitening_enabled)
+            page_latex = (ocr_result.get("latex") or "").strip()
+            page_text = (ocr_result.get("text") or "").strip()
+
+            if len(page_buffers) > 1:
+                stitched_latex_parts.append(f"## Page {idx}\n\n{page_latex}")
+                stitched_text_parts.append(f"--- Page {idx} ---\n{page_text}")
+            else:
+                stitched_latex_parts.append(page_latex)
+                stitched_text_parts.append(page_text)
+
+        final_latex = "\n\n---\n\n".join(stitched_latex_parts)
+        final_text = "\n\n".join(stitched_text_parts)
+        avg_blur = round(sum(blur_scores) / len(blur_scores), 2) if blur_scores else 0.0
+
+        primary_name = files[0].filename or "Batch_Document"
+        if len(files) > 1:
+            base_stem = os.path.splitext(primary_name)[0]
+            primary_name = f"{base_stem} (+{len(files) - 1} pages)"
+
+        saved_record = save_transcription(
+            filename=primary_name,
+            markdown_content=final_latex,
+            blur_score=avg_blur,
+            whitening_enabled=is_whitening_enabled,
+            user_id=user_id,
+            access_token=token
+        )
+
+        return {
+            "status": "success",
+            "id": saved_record.get("id"),
+            "page_count": len(page_buffers),
+            "blur_score": avg_blur,
+            "latex": final_latex,
+            "text": final_text
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+
+
+@app.post("/ai-assist")
+async def ai_assist(
+    payload: AIAssistRequest,
+    authorization: str = Header(...)
+):
+    """Surgical AI Copilot endpoint with page context and structured JSON output."""
+    verify_token(authorization)
+
+    try:
+        from google import genai
+
+        client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+        system_instruction = (
+            "You are SnapTex Copilot, an expert university-level STEM assistant. "
+            "You help students audit math/physics proofs, fix OCR LaTeX errors, and turn notes into practice problems. "
+            "You must return a valid JSON response with keys: 'explanation' (Markdown with KaTeX math), "
+            "'suggested_patch' (optional corrected markdown snippet if editing), and 'target_hint'."
+        )
+
+        context_prompt = (
+            f"Mode: {payload.mode}\n"
+            f"Active Page Number: {payload.active_page_number}\n"
+            f"Active Page Content:\n{payload.active_page_content or payload.full_markdown}\n\n"
+            f"User Request: {payload.user_prompt}"
+        )
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=context_prompt,
+            config={
+                "system_instruction": system_instruction,
+                "response_mime_type": "application/json",
+            },
+        )
+
+        return {"status": "success", "result": response.text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI Copilot failed: {str(e)}")
+
+
+@app.post("/export-docx")
+def export_docx(
+    payload: ExportDocxRequest,
+    authorization: str = Header(...)
+):
+    """Converts Markdown + LaTeX into a real Microsoft Word (.docx) file with native math equations."""
+    verify_token(authorization)
+
+    safe_title = re.sub(r'[\\/*?:"<>|]', "_", payload.title.strip() or "SnapTex_Document")
+    md_content = f"# {payload.title.strip()}\n\n{payload.markdown_content}"
+
+    tmp_docx_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp_file:
+            tmp_docx_path = tmp_file.name
+
+        pypandoc.convert_text(
+            md_content,
+            "docx",
+            format="markdown+tex_math_dollars",
+            outputfile=tmp_docx_path
+        )
+
+        with open(tmp_docx_path, "rb") as f:
+            docx_bytes = f.read()
+
+    except Exception as pandoc_err:
+        print(f"Pandoc DOCX conversion fallback triggered: {pandoc_err}")
+        doc = Document()
+        doc.add_heading(payload.title.strip() or "SnapTex Document", level=1)
+        for line in payload.markdown_content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("### "):
+                doc.add_heading(stripped[4:], level=3)
+            elif stripped.startswith("## "):
+                doc.add_heading(stripped[3:], level=2)
+            elif stripped.startswith("# "):
+                doc.add_heading(stripped[2:], level=1)
+            elif stripped:
+                doc.add_paragraph(stripped)
+
+        fallback_buf = io.BytesIO()
+        doc.save(fallback_buf)
+        docx_bytes = fallback_buf.getvalue()
+    finally:
+        if tmp_docx_path and os.path.exists(tmp_docx_path):
+            os.remove(tmp_docx_path)
+
+    return StreamingResponse(
+        io.BytesIO(docx_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_title}.docx"'
+        }
     )
 
-    try {
-      const token = await getAuthToken()
-      if (!token) throw new Error('Session expired. Please sign in again.')
 
-      const formData = new FormData()
-      fileList.forEach(file => formData.append('files', file))
-      formData.append('aggressive_whitening', String(aggressiveWhitening))
+@app.get("/history")
+def get_history(authorization: str = Header(...)):
+    """Returns the 10 most recent transcriptions for the authenticated user."""
+    auth_data = verify_token(authorization)
+    token = auth_data["token"]
+    return {"history": fetch_recent_transcriptions(access_token=token, limit=10)}
 
-      const res = await fetch(`${API_URL}/process-document`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-        body: formData,
-      })
 
-      if (!res.ok) {
-        const errData = await res.json().catch(() => null)
-        throw new Error(formatApiError(errData, `Server error: ${res.statusText}`))
-      }
+@app.put("/history/{transcription_id}")
+def update_history_item(
+    transcription_id: str,
+    payload: UpdateTranscriptionRequest,
+    authorization: str = Header(...)
+):
+    """Persists edited markdown content and title to Supabase."""
+    auth_data = verify_token(authorization)
+    token = auth_data["token"]
 
-      const data = await res.json()
-      const baseTitle = fileList[0].name.replace(/\.[^/.]+$/, '')
-      const displayTitle =
-        fileList.length > 1 ? `${baseTitle} (+${fileList.length - 1} pages)` : baseTitle
+    try:
+        updated_record = update_transcription_content(
+            transcription_id=transcription_id,
+            markdown_content=payload.markdown_content,
+            filename=payload.filename,
+            access_token=token
+        )
+        if not updated_record:
+            raise HTTPException(status_code=404, detail="Record not found or update failed.")
+        return {"status": "success", "data": updated_record}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
 
-      const newDoc: DocumentItem = {
-        id: data.id ? String(data.id) : String(Date.now()),
-        title: displayTitle,
-        content: data.latex || data.text || '',
-        created_at: new Date().toISOString(),
-      }
 
-      setDocuments([newDoc, ...documents])
-      setCurrentDoc(newDoc)
-      fetchHistory(token)
-    } catch (err: any) {
-      console.error('OCR processing failed:', err)
-      setUploadError(err.message || 'Failed to process document.')
-    } finally {
-      setIsProcessing(false)
-      e.target.value = ''
-    }
-  }
+@app.delete("/history/{transcription_id}")
+def delete_history_item(transcription_id: str, authorization: str = Header(...)):
+    """Deletes a specific transcription row belonging to the authenticated user."""
+    auth_data = verify_token(authorization)
+    token = auth_data["token"]
 
-  const handleSaveDoc = async (markdown: string) => {
-    if (!currentDoc) return
-    try {
-      const token = await getAuthToken()
-      if (!token) throw new Error('Session expired. Please sign in again.')
+    try:
+        supabase = get_supabase_client(access_token=token)
+        supabase.table("transcriptions").delete().eq("id", transcription_id).execute()
+        return {"status": "success", "message": "Record deleted successfully."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Deletion failed: {str(e)}")
 
-      const res = await fetch(`${API_URL}/history/${currentDoc.id}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          markdown_content: markdown,
-          filename: currentDoc.title,
-        }),
-      })
 
-      if (!res.ok) {
-        const errData = await res.json().catch(() => null)
-        throw new Error(formatApiError(errData, 'Failed to save changes.'))
-      }
+@app.patch("/history/{transcription_id}")
+def rename_history_item(
+    transcription_id: str,
+    new_filename: str = Query(...),
+    authorization: str = Header(...)
+):
+    """Renames a specific transcription record belonging to the authenticated user."""
+    auth_data = verify_token(authorization)
+    token = auth_data["token"]
 
-      const updated = { ...currentDoc, content: markdown }
-      setCurrentDoc(updated)
-      setDocuments(documents.map(d => d.id === updated.id ? updated : d))
-      alert('Saved to Supabase!')
-    } catch (err: any) {
-      console.error('Save failed:', err)
-      alert(err.message || 'Error saving document.')
-    }
-  }
-
-  const handleRenameDoc = async (e: React.MouseEvent, doc: DocumentItem) => {
-    e.stopPropagation()
-    const newTitle = window.prompt('Rename document:', doc.title)?.trim()
-    if (!newTitle || newTitle === doc.title) return
-
-    try {
-      const token = await getAuthToken()
-      if (!token) return
-
-      const res = await fetch(
-        `${API_URL}/history/${doc.id}?new_filename=${encodeURIComponent(newTitle)}`,
-        {
-          method: 'PATCH',
-          headers: { Authorization: `Bearer ${token}` },
-        }
-      )
-
-      if (res.ok) {
-        setDocuments(documents.map(d => d.id === doc.id ? { ...d, title: newTitle } : d))
-        if (currentDoc?.id === doc.id) {
-          setCurrentDoc({ ...currentDoc, title: newTitle })
-        }
-      }
-    } catch (err) {
-      console.error('Rename failed:', err)
-    }
-  }
-
-  const handleDeleteDoc = async (e: React.MouseEvent, docId: string) => {
-    e.stopPropagation()
-    if (!window.confirm('Delete this transcription permanently?')) return
-
-    try {
-      const token = await getAuthToken()
-      if (!token) return
-
-      const res = await fetch(`${API_URL}/history/${docId}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
-      })
-
-      if (res.ok) {
-        setDocuments(documents.filter(d => d.id !== docId))
-        if (currentDoc?.id === docId) setCurrentDoc(null)
-      }
-    } catch (err) {
-      console.error('Delete failed:', err)
-    }
-  }
-
-  const handleExportDocx = async () => {
-    if (!currentDoc) return
-    try {
-      const token = await getAuthToken()
-      if (!token) throw new Error('Session expired. Please sign in again.')
-
-      const res = await fetch(`${API_URL}/export-docx`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          title: currentDoc.title,
-          markdown_content: currentDoc.content,
-        }),
-      })
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => null)
-        throw new Error(formatApiError(errData, 'Failed to generate Word document.'))
-      }
-
-      const blob = await res.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `${currentDoc.title}.docx`
-      document.body.appendChild(a)
-      a.click()
-      a.remove()
-      URL.revokeObjectURL(url)
-    } catch (err: any) {
-      console.error('DOCX export failed:', err)
-      alert(err.message || 'Failed to export .docx file.')
-    }
-  }
-
-  // --- Auth Screen if Not Logged In ---
-  if (!user) {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-[#191919] px-4">
-        <div className="w-full max-w-md p-8 bg-[#222222] border border-zinc-800 rounded-2xl shadow-2xl">
-          <div className="flex items-center space-x-2 mb-6">
-            <div className="p-2 bg-rose-600 rounded-lg text-white">
-              <Sparkles className="w-6 h-6" />
-            </div>
-            <h1 className="text-2xl font-bold text-white tracking-tight">SnapTex Workspace</h1>
-          </div>
-
-          <form onSubmit={handleAuth} className="space-y-4">
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">Email</label>
-              <input
-                type="email"
-                required
-                value={authEmail}
-                onChange={e => setAuthEmail(e.target.value)}
-                className="w-full px-4 py-2.5 bg-[#191919] border border-zinc-700 rounded-lg text-white focus:outline-none focus:border-rose-500"
-                placeholder="you@university.edu"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">Password</label>
-              <input
-                type="password"
-                required
-                value={authPassword}
-                onChange={e => setAuthPassword(e.target.value)}
-                className="w-full px-4 py-2.5 bg-[#191919] border border-zinc-700 rounded-lg text-white focus:outline-none focus:border-rose-500"
-                placeholder="••••••••"
-              />
-            </div>
-            <button
-              type="submit"
-              className="w-full py-2.5 bg-rose-600 hover:bg-rose-500 text-white font-medium rounded-lg transition-colors shadow-lg shadow-rose-600/20"
-            >
-              {isSignUp ? 'Create Account' : 'Sign In'}
-            </button>
-          </form>
-
-          <div className="mt-6 text-center">
-            <button
-              onClick={() => setIsSignUp(!isSignUp)}
-              className="text-sm text-zinc-400 hover:text-white transition-colors"
-            >
-              {isSignUp ? 'Already have an account? Sign In' : "Don't have an account? Sign Up"}
-            </button>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  // --- Main Notion Workspace ---
-  return (
-    <div className="flex h-screen bg-[#191919] overflow-hidden">
-      {/* Left Sidebar */}
-      <aside className="w-72 bg-[#202020] border-r border-zinc-800 flex flex-col justify-between">
-        <div>
-          {/* Workspace Title */}
-          <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
-            <div className="flex items-center space-x-2">
-              <div className="p-1.5 bg-rose-600 rounded text-white">
-                <Sparkles className="w-4 h-4" />
-              </div>
-              <span className="font-bold text-white tracking-tight">SnapTex AI</span>
-            </div>
-            <button
-              onClick={() => setCurrentDoc(null)}
-              className="p-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg transition-colors"
-              title="New Document"
-            >
-              <Plus className="w-4 h-4" />
-            </button>
-          </div>
-
-          {/* Upload Section */}
-          <div className="p-4 border-b border-zinc-800">
-            <label className="flex flex-col items-center justify-center p-4 border-2 border-dashed border-zinc-700 hover:border-rose-500/60 rounded-xl cursor-pointer bg-[#191919] transition-all group">
-              {isProcessing ? (
-                <div className="flex flex-col items-center space-y-2 py-2">
-                  <Loader2 className="w-6 h-6 text-rose-500 animate-spin" />
-                  <span className="text-xs text-zinc-400 text-center">{processingLabel}</span>
-                </div>
-              ) : (
-                <div className="flex flex-col items-center space-y-1 text-center">
-                  <Upload className="w-5 h-5 text-zinc-400 group-hover:text-rose-400 transition-colors" />
-                  <span className="text-xs font-medium text-zinc-300">Upload STEM Pages / PDF</span>
-                  <span className="text-[10px] text-zinc-500">Up to 5 images or 5-page PDF</span>
-                </div>
-              )}
-              <input
-                type="file"
-                accept="image/*,application/pdf"
-                multiple
-                onChange={handleFileUpload}
-                className="hidden"
-                disabled={isProcessing}
-              />
-            </label>
-
-            {/* Aggressive Whitening Toggle */}
-            <div className="flex items-center justify-between mt-3 px-1">
-              <span className="text-xs text-zinc-400">Aggressive Whitening</span>
-              <input
-                type="checkbox"
-                checked={aggressiveWhitening}
-                onChange={e => setAggressiveWhitening(e.target.checked)}
-                className="accent-rose-600 rounded cursor-pointer"
-              />
-            </div>
-            {uploadError && <p className="text-xs text-rose-400 mt-2">{uploadError}</p>}
-          </div>
-
-          {/* Document History List */}
-          <div className="overflow-y-auto max-h-[calc(100vh-280px)] px-3 py-2 space-y-1">
-            <div className="px-2 py-1 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">History</div>
-            {documents.map(doc => (
-              <div
-                key={doc.id}
-                onClick={() => setCurrentDoc(doc)}
-                className={`group w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors cursor-pointer ${
-                  currentDoc?.id === doc.id
-                    ? 'bg-rose-600/15 text-rose-300 font-medium'
-                    : 'text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200'
-                }`}
-              >
-                <div className="flex items-center space-x-2 truncate pr-2">
-                  <FileText className="w-4 h-4 shrink-0 text-zinc-500" />
-                  <span className="truncate">{doc.title}</span>
-                </div>
-                <div className="flex items-center space-x-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-                  <button
-                    onClick={e => handleRenameDoc(e, doc)}
-                    className="p-1 text-zinc-400 hover:text-white rounded hover:bg-zinc-700"
-                    title="Rename"
-                  >
-                    <Pencil className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    onClick={e => handleDeleteDoc(e, doc.id)}
-                    className="p-1 text-zinc-400 hover:text-rose-400 rounded hover:bg-zinc-700"
-                    title="Delete"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* User Footer */}
-        <div className="p-4 border-t border-zinc-800 flex items-center justify-between bg-[#1d1d1d]">
-          <span className="text-xs text-zinc-400 truncate max-w-[170px]">{user.email}</span>
-          <button
-            onClick={() => supabase.auth.signOut()}
-            className="p-1.5 text-zinc-400 hover:text-rose-400 transition-colors rounded-lg hover:bg-zinc-800"
-            title="Sign Out"
-          >
-            <LogOut className="w-4 h-4" />
-          </button>
-        </div>
-      </aside>
-
-      {/* Main Workspace Canvas */}
-      <main className="flex-1 p-8 overflow-y-auto">
-        {currentDoc ? (
-          <SnapTexEditor
-            key={currentDoc.id}
-            initialContent={currentDoc.content}
-            title={currentDoc.title}
-            onTitleChange={newTitle => setCurrentDoc({ ...currentDoc, title: newTitle })}
-            onSave={handleSaveDoc}
-            onExportDocx={handleExportDocx}
-          />
-        ) : (
-          <div className="flex flex-col items-center justify-center h-full text-center max-w-md mx-auto">
-            <div className="p-4 bg-[#222] border border-zinc-800 rounded-2xl mb-4 text-rose-500">
-              <Sparkles className="w-8 h-8" />
-            </div>
-            <h2 className="text-xl font-bold text-white mb-2">Welcome to SnapTex Workspace</h2>
-            <p className="text-sm text-zinc-400 mb-6">
-              Upload up to 5 handwritten math notes, circuit diagrams, or a 5-page PDF on the left to transcribe and edit them in your live Notion-style editor.
-            </p>
-          </div>
-        )}
-      </main>
-    </div>
-  )
-}
+    try:
+        updated_record = update_transcription_filename(
+            transcription_id=transcription_id,
+            new_filename=new_filename,
+            access_token=token
+        )
+        if not updated_record:
+            raise HTTPException(status_code=400, detail="Could not update record.")
+        return {"status": "success", "data": updated_record}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Rename failed: {str(e)}")
