@@ -25,7 +25,7 @@ from database import (
     update_transcription_content
 )
 
-app = FastAPI(title="SnapTex API", version="1.7")
+app = FastAPI(title="SnapTex API", version="1.8")
 
 app.add_middleware(
     CORSMiddleware,
@@ -101,6 +101,19 @@ def pdf_bytes_to_png_pages(pdf_bytes: bytes, max_pages: int = MAX_PAGES) -> List
     return page_images
 
 
+def _extract_clean_json(raw_text: str) -> str:
+    """Strips markdown ```json ... ``` fences and isolates the JSON object."""
+    cleaned = raw_text.strip()
+    fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned)
+    if fence_match:
+        cleaned = fence_match.group(1).strip()
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        cleaned = cleaned[start : end + 1]
+    return cleaned
+
+
 def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> str:
     """Uses provider_manager key pools: Gemini 3.8+ -> Groq -> OpenRouter with strict JSON output."""
     provider_manager.reload_all()
@@ -126,7 +139,7 @@ def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> s
                         },
                     )
                     if response.text:
-                        return response.text
+                        return _extract_clean_json(response.text)
                 except APIError as e:
                     errors.append(f"Google({model_name}): {e.code}")
                     if e.code == 429 or "quota" in str(e).lower():
@@ -162,7 +175,7 @@ def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> s
             )
             with urllib.request.urlopen(req, timeout=45) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-                return data["choices"][0]["message"]["content"]
+                return _extract_clean_json(data["choices"][0]["message"]["content"])
         except Exception as e:
             if "429" in str(e):
                 provider_manager.groq_pool.mark_rate_limited(groq_key, cooldown_seconds=60)
@@ -197,7 +210,7 @@ def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> s
             )
             with urllib.request.urlopen(req, timeout=60) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-                return data["choices"][0]["message"]["content"]
+                return _extract_clean_json(data["choices"][0]["message"]["content"])
         except Exception as e:
             if "429" in str(e):
                 provider_manager.openrouter_pool.mark_rate_limited(or_key, cooldown_seconds=60)

@@ -42,6 +42,25 @@ interface TaggedSpot {
   previewText: string
 }
 
+function renderStudentFriendlyHtml(md: string): string {
+  if (!md) return ''
+  let withMath = md.replace(/\$\$([\s\S]+?)\$\$/g, (_, tex) => {
+    try {
+      return katex.renderToString(tex.trim(), { throwOnError: false, displayMode: true })
+    } catch {
+      return tex
+    }
+  })
+  withMath = withMath.replace(/\$([^\n$]+?)\$/g, (_, tex) => {
+    try {
+      return katex.renderToString(tex.trim(), { throwOnError: false, displayMode: false })
+    } catch {
+      return tex
+    }
+  })
+  return markdownToHtml(withMath)
+}
+
 export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
   initialContent,
   title,
@@ -270,10 +289,16 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
 
       const data = await res.json()
       let parsedResult = data.result
-      try {
-        parsedResult = JSON.parse(data.result)
-      } catch {
-        // Fallback if raw text
+      if (typeof parsedResult === 'string') {
+        const cleaned = parsedResult
+          .replace(/^```(?:json)?\s*/i, '')
+          .replace(/\s*```$/i, '')
+          .trim()
+        try {
+          parsedResult = JSON.parse(cleaned)
+        } catch {
+          // Keep as string if plain text
+        }
       }
       setCopilotResponse(parsedResult)
     } catch (err: any) {
@@ -618,7 +643,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                 {typeof copilotResponse === 'object' && copilotResponse.solution_markdown && (
                   <button
                     onClick={handleOpenSolutionInWorkspace}
-                    className="w-full text-left p-3 rounded-xl bg-rose-600/15 hover:bg-rose-600/25 border border-rose-500/40 transition-all group flex items-center justify-between"
+                    className="w-full text-left p-3 rounded-xl bg-rose-600/20 hover:bg-rose-600/30 border border-rose-500/50 transition-all group flex items-center justify-between shadow-lg"
                   >
                     <div className="flex items-center space-x-2.5 truncate pr-2">
                       <div className="p-2 bg-rose-600 rounded-lg text-white shrink-0">
@@ -629,7 +654,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                           {copilotResponse.solution_title || `Solution — ${title}`}
                         </div>
                         <div className="text-[10px] text-rose-300">
-                          Click to open in main workspace & keep chatting
+                          Click to open rendered Solution File in editor
                         </div>
                       </div>
                     </div>
@@ -637,11 +662,17 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                   </button>
                 )}
 
-                <div className="text-xs leading-relaxed text-zinc-200 whitespace-pre-wrap">
-                  {typeof copilotResponse === 'string'
-                    ? copilotResponse
-                    : copilotResponse.explanation || JSON.stringify(copilotResponse)}
-                </div>
+                {/* KaTeX-Rendered Explanation (No Raw LaTeX!) */}
+                <div
+                  className="snaptex-prose text-xs leading-relaxed text-zinc-200 [&>p]:my-1.5"
+                  dangerouslySetInnerHTML={{
+                    __html: renderStudentFriendlyHtml(
+                      typeof copilotResponse === 'string'
+                        ? copilotResponse
+                        : copilotResponse.explanation || ''
+                    ),
+                  }}
+                />
 
                 {/* Suggested Surgical Patch Preview */}
                 {typeof copilotResponse === 'object' && copilotResponse.suggested_patch && (
@@ -649,9 +680,12 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                     <div className="text-[10px] font-semibold uppercase tracking-wider text-emerald-400">
                       Proposed Replacement
                     </div>
-                    <pre className="text-[11px] font-mono text-emerald-200 whitespace-pre-wrap break-words">
-                      {copilotResponse.suggested_patch}
-                    </pre>
+                    <div
+                      className="snaptex-prose text-xs text-emerald-100"
+                      dangerouslySetInnerHTML={{
+                        __html: renderStudentFriendlyHtml(copilotResponse.suggested_patch),
+                      }}
+                    />
                     <button
                       onClick={handleApplySurgicalPatch}
                       className="w-full flex items-center justify-center space-x-1.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium rounded-lg transition-colors"
