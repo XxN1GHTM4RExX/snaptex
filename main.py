@@ -116,6 +116,35 @@ def _extract_clean_json(raw_text: str) -> str:
     return cleaned
 
 
+def _normalize_katex_delimiters(text: str | None) -> str | None:
+    """Converts \\[...\\], \\(...\\), and JSON-stripped [...] / (...) math blocks into $$...$$ and $...$."""
+    if not text or not isinstance(text, str):
+        return text
+
+    # 1. Standard \[ ... \] -> $$ ... $$ and \( ... \) -> $ ... $
+    text = re.sub(r"\\\[\s*([\s\S]*?)\s*\\\]", r"$$\n\1\n$$", text)
+    text = re.sub(r"\\\(\s*(.*?)\s*\\\)", r"$\1$", text)
+
+    # 2. Catch JSON-unescaped standalone display lines: [ ... ] containing LaTeX/math symbols
+    def _replace_display_bracket(match: re.Match) -> str:
+        inner = match.group(1).strip()
+        if any(tok in inner for tok in ("\\", "^", "_", "=", "+", "-")):
+            return f"$$\n{inner}\n$$"
+        return match.group(0)
+
+    text = re.sub(r"(?m)^\s*\[\s*([^\[\]\n]+?)\s*\]\s*$", _replace_display_bracket, text)
+
+    # 3. Catch JSON-unescaped inline math: ( ... ) containing backslashes, powers, or equations
+    def _replace_inline_paren(match: re.Match) -> str:
+        inner = match.group(1).strip()
+        if "\\" in inner or "^" in inner or "_" in inner or re.search(r"[a-zA-Z0-9']\s*=\s*[a-zA-Z0-9\\-]", inner):
+            return f"${inner}$"
+        return match.group(0)
+
+    text = re.sub(r"(?<!\\)\(\s*([^()\n]+?)\s*\)", _replace_inline_paren, text)
+    return text
+
+
 def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> str:
     """Uses provider_manager key pools: Gemini 2.5 -> Groq -> OpenRouter with strict JSON output."""
     provider_manager.reload_all()
@@ -331,8 +360,10 @@ async def ai_assist(
             "You help students audit math/physics proofs, fix OCR LaTeX errors, generate practice exercises, "
             "and produce complete step-by-step solution documents. "
             f"IMPORTANT: Write ALL natural-language explanations, headings, solution titles, and worked solutions strictly in {lang_label}. "
+            "CRITICAL MATH FORMATTING RULE: Use ONLY single dollar signs ($...$) for inline math and double dollar signs ($$...$$) on separate lines for display block math. "
+            "NEVER use \\(...\\) or \\[...\\] delimiters anywhere. "
             "You MUST return strictly valid JSON with exact keys: "
-            "'explanation' (concise summary or explanation in Markdown with KaTeX math), "
+            "'explanation' (concise summary or explanation in Markdown with $...$ / $$...$$ KaTeX math), "
             "'suggested_patch' (corrected markdown snippet when editing a tagged line, or null), "
             f"'solution_title' (if mode is 'solution', a clean title like '{title_example}', else null), and "
             "'solution_markdown' (if mode is 'solution', the complete, rigorous step-by-step worked solution "
@@ -348,8 +379,13 @@ async def ai_assist(
             f"User Request: {payload.user_prompt}"
         )
 
-        result_json = run_copilot_with_fallback(system_instruction, context_prompt)
-        return {"status": "success", "result": result_json}
+        raw_result_json = run_copilot_with_fallback(system_instruction, context_prompt)
+        parsed = json.loads(raw_result_json)
+        for field in ("explanation", "suggested_patch", "solution_markdown"):
+            if field in parsed and parsed[field]:
+                parsed[field] = _normalize_katex_delimiters(parsed[field])
+
+        return {"status": "success", "result": json.dumps(parsed, ensure_ascii=False)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI Copilot failed: {str(e)}")
 
