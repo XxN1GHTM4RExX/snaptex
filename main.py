@@ -1,9 +1,16 @@
 import io
 import os
+import re
+import tempfile
+from typing import List
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from supabase import create_client
+import pypdfium2 as pdfium
+import pypandoc
+from docx import Document
 
 from ocr_engine import process_image_with_gemini
 from blur_detector import calculate_blur_score
@@ -15,7 +22,7 @@ from database import (
     update_transcription_content
 )
 
-app = FastAPI(title="SnapTex API", version="1.2")
+app = FastAPI(title="SnapTex API", version="1.3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,10 +35,17 @@ app.add_middleware(
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
+MAX_PAGES = 5
+
 
 class UpdateTranscriptionRequest(BaseModel):
     markdown_content: str
     filename: str | None = None
+
+
+class ExportDocxRequest(BaseModel):
+    title: str = "SnapTex_Document"
+    markdown_content: str
 
 
 def verify_token(authorization: str = Header(...)):
@@ -51,14 +65,40 @@ def verify_token(authorization: str = Header(...)):
         raise HTTPException(status_code=401, detail=f"Authentication error: {str(e)}")
 
 
+def pdf_bytes_to_png_pages(pdf_bytes: bytes, max_pages: int = MAX_PAGES) -> List[bytes]:
+    """Renders up to `max_pages` of a PDF into high-res PNG byte buffers."""
+    pdf = pdfium.PdfDocument(pdf_bytes)
+    total_pages = len(pdf)
+    if total_pages > max_pages:
+        pdf.close()
+        raise HTTPException(
+            status_code=400,
+            detail=f"PDF has {total_pages} pages. Maximum allowed is {max_pages} pages per upload."
+        )
+
+    page_images: List[bytes] = []
+    for i in range(total_pages):
+        page = pdf[i]
+        # Scale=2.5 (~180-200 DPI) gives sharp handwriting & math OCR without blowing RAM
+        bitmap = page.render(scale=2.5)
+        pil_image = bitmap.to_pil()
+        buf = io.BytesIO()
+        pil_image.save(buf, format="PNG")
+        page_images.append(buf.getvalue())
+        page.close()
+
+    pdf.close()
+    return page_images
+
+
 @app.get("/")
 def read_root():
-    return {"message": "SnapTex API with API Key Rotation is online and healthy!"}
+    return {"message": "SnapTex API (Batch OCR + Native DOCX Export) is online and healthy!"}
 
 
 @app.post("/process-document")
 async def process_document(
-    file: UploadFile = File(...),
+    files: List[UploadFile] = File(...),
     aggressive_whitening: str = Form("false"),
     authorization: str = Header(...)
 ):
@@ -67,18 +107,66 @@ async def process_document(
         token = auth_data["token"]
         user_id = auth_data["user_id"]
 
-        contents = await file.read()
-        blur_score = calculate_blur_score(contents)
+        if not files:
+            raise HTTPException(status_code=400, detail="No files uploaded.")
 
         is_whitening_enabled = aggressive_whitening.lower() in ["true", "1", "yes"]
 
-        ocr_result = process_image_with_gemini(contents, aggressive_whitening=is_whitening_enabled)
-        latex_text = ocr_result.get("latex", "")
+        # Expand uploaded files into ordered page image byte buffers (max 5 pages total)
+        page_buffers: List[bytes] = []
+        for upload in files:
+            raw_bytes = await upload.read()
+            content_type = (upload.content_type or "").lower()
+            filename_lower = (upload.filename or "").lower()
+
+            if content_type == "application/pdf" or filename_lower.endswith(".pdf"):
+                if len(files) > 1:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Please upload either 1 PDF (up to 5 pages) or up to 5 images at once."
+                    )
+                page_buffers.extend(pdf_bytes_to_png_pages(raw_bytes, max_pages=MAX_PAGES))
+            else:
+                page_buffers.append(raw_bytes)
+
+        if len(page_buffers) > MAX_PAGES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"You uploaded {len(page_buffers)} pages. Maximum allowed is {MAX_PAGES} pages per batch."
+            )
+
+        stitched_latex_parts: List[str] = []
+        stitched_text_parts: List[str] = []
+        blur_scores: List[float] = []
+
+        for idx, img_bytes in enumerate(page_buffers, start=1):
+            score = calculate_blur_score(img_bytes)
+            blur_scores.append(score)
+
+            ocr_result = process_image_with_gemini(img_bytes, aggressive_whitening=is_whitening_enabled)
+            page_latex = (ocr_result.get("latex") or "").strip()
+            page_text = (ocr_result.get("text") or "").strip()
+
+            if len(page_buffers) > 1:
+                stitched_latex_parts.append(f"## Page {idx}\n\n{page_latex}")
+                stitched_text_parts.append(f"--- Page {idx} ---\n{page_text}")
+            else:
+                stitched_latex_parts.append(page_latex)
+                stitched_text_parts.append(page_text)
+
+        final_latex = "\n\n---\n\n".join(stitched_latex_parts)
+        final_text = "\n\n".join(stitched_text_parts)
+        avg_blur = round(sum(blur_scores) / len(blur_scores), 2) if blur_scores else 0.0
+
+        primary_name = files[0].filename or "Batch_Document"
+        if len(files) > 1:
+            base_stem = os.path.splitext(primary_name)[0]
+            primary_name = f"{base_stem} (+{len(files) - 1} pages)"
 
         saved_record = save_transcription(
-            filename=file.filename,
-            markdown_content=latex_text,
-            blur_score=blur_score,
+            filename=primary_name,
+            markdown_content=final_latex,
+            blur_score=avg_blur,
             whitening_enabled=is_whitening_enabled,
             user_id=user_id,
             access_token=token
@@ -87,14 +175,74 @@ async def process_document(
         return {
             "status": "success",
             "id": saved_record.get("id"),
-            "blur_score": blur_score,
-            "latex": latex_text,
-            "text": ocr_result.get("text", "")
+            "page_count": len(page_buffers),
+            "blur_score": avg_blur,
+            "latex": final_latex,
+            "text": final_text
         }
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+
+
+@app.post("/export-docx")
+def export_docx(
+    payload: ExportDocxRequest,
+    authorization: str = Header(...)
+):
+    """Converts Markdown + LaTeX into a real Microsoft Word (.docx) file with native math equations."""
+    verify_token(authorization)
+
+    safe_title = re.sub(r'[\\/*?:"<>|]', "_", payload.title.strip() or "SnapTex_Document")
+    md_content = f"# {payload.title.strip()}\n\n{payload.markdown_content}"
+
+    tmp_docx_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp_file:
+            tmp_docx_path = tmp_file.name
+
+        # Pandoc converts Markdown + $...$ / $$...$$ directly into native Word OMML equations
+        pypandoc.convert_text(
+            md_content,
+            "docx",
+            format="markdown+tex_math_dollars",
+            outputfile=tmp_docx_path
+        )
+
+        with open(tmp_docx_path, "rb") as f:
+            docx_bytes = f.read()
+
+    except Exception as pandoc_err:
+        print(f"Pandoc DOCX conversion fallback triggered: {pandoc_err}")
+        # Clean fallback using python-docx if Pandoc hits an unusual macro
+        doc = Document()
+        doc.add_heading(payload.title.strip() or "SnapTex Document", level=1)
+        for line in payload.markdown_content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("### "):
+                doc.add_heading(stripped[4:], level=3)
+            elif stripped.startswith("## "):
+                doc.add_heading(stripped[3:], level=2)
+            elif stripped.startswith("# "):
+                doc.add_heading(stripped[2:], level=1)
+            elif stripped:
+                doc.add_paragraph(stripped)
+
+        fallback_buf = io.BytesIO()
+        doc.save(fallback_buf)
+        docx_bytes = fallback_buf.getvalue()
+    finally:
+        if tmp_docx_path and os.path.exists(tmp_docx_path):
+            os.remove(tmp_docx_path)
+
+    return StreamingResponse(
+        io.BytesIO(docx_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_title}.docx"'
+        }
+    )
 
 
 @app.get("/history")

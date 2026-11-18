@@ -158,6 +158,13 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
         .snaptex-prose table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
         .snaptex-prose th, .snaptex-prose td { border: 1px solid #3f3f46; padding: 0.5rem 0.75rem; text-align: left; }
         .snaptex-prose th { background-color: #27272a; font-weight: 600; color: #fff; }
+
+        /* Hide ProseMirror atomic separator boxes & clear white backgrounds on inline/block math */
+        .snaptex-prose img.ProseMirror-separator {
+          display: none !important;
+        }
+        .snaptex-prose [data-type="inline-math"],
+        .snaptex-prose [data-type="block-math"],
         .tiptap-mathematics-render {
           background: transparent !important;
           color: #f4f4f5 !important;
@@ -166,9 +173,13 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
           cursor: pointer;
           transition: background-color 0.15s ease;
         }
+        .snaptex-prose [data-type="inline-math"]:hover,
+        .snaptex-prose [data-type="block-math"]:hover,
         .tiptap-mathematics-render:hover {
           background: rgba(244, 63, 94, 0.14) !important;
         }
+        .ProseMirror-selectednode [data-type="inline-math"],
+        .ProseMirror-selectednode [data-type="block-math"],
         .ProseMirror-selectednode .tiptap-mathematics-render,
         .tiptap-mathematics-render.ProseMirror-selectednode {
           background: rgba(244, 63, 94, 0.22) !important;

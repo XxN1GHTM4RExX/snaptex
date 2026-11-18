@@ -23,6 +23,7 @@ export default function App() {
   const [currentDoc, setCurrentDoc] = useState<DocumentItem | null>(null)
 
   const [isProcessing, setIsProcessing] = useState(false)
+  const [processingLabel, setProcessingLabel] = useState('Transcribing STEM Content...')
   const [aggressiveWhitening, setAggressiveWhitening] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
 
@@ -88,18 +89,32 @@ export default function App() {
   }
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
+    const selectedFiles = e.target.files
+    if (!selectedFiles || selectedFiles.length === 0) return
+
+    const fileList = Array.from(selectedFiles)
+    if (fileList.length > 5) {
+      setUploadError('Maximum 5 images or 1 PDF (up to 5 pages) allowed per upload.')
+      e.target.value = ''
+      return
+    }
 
     setIsProcessing(true)
     setUploadError(null)
+    setProcessingLabel(
+      fileList.length > 1
+        ? `Transcribing ${fileList.length} pages...`
+        : fileList[0].type === 'application/pdf'
+          ? 'Rendering & transcribing PDF pages...'
+          : 'Transcribing STEM Content...'
+    )
 
     try {
       const token = await getAuthToken()
       if (!token) throw new Error('Session expired. Please sign in again.')
 
       const formData = new FormData()
-      formData.append('file', file)
+      fileList.forEach(file => formData.append('files', file))
       formData.append('aggressive_whitening', String(aggressiveWhitening))
 
       const res = await fetch(`${API_URL}/process-document`, {
@@ -116,9 +131,13 @@ export default function App() {
       }
 
       const data = await res.json()
+      const baseTitle = fileList[0].name.replace(/\.[^/.]+$/, '')
+      const displayTitle =
+        fileList.length > 1 ? `${baseTitle} (+${fileList.length - 1} pages)` : baseTitle
+
       const newDoc: DocumentItem = {
         id: data.id ? String(data.id) : String(Date.now()),
-        title: file.name.replace(/\.[^/.]+$/, ''),
+        title: displayTitle,
         content: data.latex || data.text || '',
         created_at: new Date().toISOString(),
       }
@@ -131,6 +150,7 @@ export default function App() {
       setUploadError(err.message || 'Failed to process document.')
     } finally {
       setIsProcessing(false)
+      e.target.value = ''
     }
   }
 
@@ -217,14 +237,42 @@ export default function App() {
     }
   }
 
-  const handleExportDocx = () => {
+  const handleExportDocx = async () => {
     if (!currentDoc) return
-    const blob = new Blob([currentDoc.content], { type: 'text/markdown;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${currentDoc.title}.md`
-    a.click()
+    try {
+      const token = await getAuthToken()
+      if (!token) throw new Error('Session expired. Please sign in again.')
+
+      const res = await fetch(`${API_URL}/export-docx`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          title: currentDoc.title,
+          markdown_content: currentDoc.content,
+        }),
+      })
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => null)
+        throw new Error(errData?.detail || 'Failed to generate Word document.')
+      }
+
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${currentDoc.title}.docx`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    } catch (err: any) {
+      console.error('DOCX export failed:', err)
+      alert(err.message || 'Failed to export .docx file.')
+    }
   }
 
   // --- Auth Screen if Not Logged In ---
@@ -312,16 +360,23 @@ export default function App() {
               {isProcessing ? (
                 <div className="flex flex-col items-center space-y-2 py-2">
                   <Loader2 className="w-6 h-6 text-rose-500 animate-spin" />
-                  <span className="text-xs text-zinc-400">Transcribing STEM Content...</span>
+                  <span className="text-xs text-zinc-400 text-center">{processingLabel}</span>
                 </div>
               ) : (
                 <div className="flex flex-col items-center space-y-1 text-center">
                   <Upload className="w-5 h-5 text-zinc-400 group-hover:text-rose-400 transition-colors" />
-                  <span className="text-xs font-medium text-zinc-300">Upload STEM Page / Photo</span>
-                  <span className="text-[10px] text-zinc-500">PNG, JPG, PDF up to 25MB</span>
+                  <span className="text-xs font-medium text-zinc-300">Upload STEM Pages / PDF</span>
+                  <span className="text-[10px] text-zinc-500">Up to 5 images or 5-page PDF</span>
                 </div>
               )}
-              <input type="file" accept="image/*,application/pdf" onChange={handleFileUpload} className="hidden" disabled={isProcessing} />
+              <input
+                type="file"
+                accept="image/*,application/pdf"
+                multiple
+                onChange={handleFileUpload}
+                className="hidden"
+                disabled={isProcessing}
+              />
             </label>
 
             {/* Aggressive Whitening Toggle */}
@@ -406,7 +461,7 @@ export default function App() {
             </div>
             <h2 className="text-xl font-bold text-white mb-2">Welcome to SnapTex Workspace</h2>
             <p className="text-sm text-zinc-400 mb-6">
-              Upload a handwritten math note, circuit diagram, or textbook photo on the left to transcribe and edit it instantly in your live Notion-style editor.
+              Upload up to 5 handwritten math notes, circuit diagrams, or a 5-page PDF on the left to transcribe and edit them in your live Notion-style editor.
             </p>
           </div>
         )}
