@@ -44,6 +44,18 @@ export default function App() {
   const API_URL = import.meta.env.VITE_API_URL || 'https://snaptex.onrender.com'
 
   useEffect(() => {
+    document.title = 'SnapTex AI — STEM OCR & Equation Workspace'
+    let link = document.querySelector("link[rel~='icon']") as HTMLLinkElement | null
+    if (!link) {
+      link = document.createElement('link')
+      link.rel = 'icon'
+      document.head.appendChild(link)
+    }
+    link.href =
+      "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23e11d48'/%3E%3Cpath d='M16 6l2.4 7.6L26 16l-7.6 2.4L16 26l-2.4-7.6L6 16l7.6-2.4L16 6z' fill='%23ffffff'/%3E%3C/svg%3E"
+  }, [])
+
+  useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user ?? null)
       if (session?.access_token) fetchHistory(session.access_token)
