@@ -25,7 +25,7 @@ from database import (
     update_transcription_content
 )
 
-app = FastAPI(title="SnapTex API", version="1.8")
+app = FastAPI(title="SnapTex API", version="1.9")
 
 app.add_middleware(
     CORSMiddleware,
@@ -46,9 +46,10 @@ class UpdateTranscriptionRequest(BaseModel):
     filename: str | None = None
 
 
-class ExportDocxRequest(BaseModel):
+class ExportDocumentRequest(BaseModel):
     title: str = "SnapTex_Document"
     markdown_content: str
+    format: str = "docx"  # "docx", "pdf", "tex"
 
 
 class AIAssistRequest(BaseModel):
@@ -119,7 +120,6 @@ def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> s
     provider_manager.reload_all()
     errors = []
 
-    # 1. Exhaust all available keys in Google Pool
     for _ in range(len(provider_manager.google_pool.keys)):
         g_key = provider_manager.google_pool.get_key()
         if not g_key:
@@ -148,7 +148,6 @@ def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> s
         except Exception as e:
             errors.append(f"GoogleClient: {str(e)}")
 
-    # 2. Exhaust all available keys in Groq Pool
     for _ in range(len(provider_manager.groq_pool.keys)):
         groq_key = provider_manager.groq_pool.get_key()
         if not groq_key:
@@ -181,7 +180,6 @@ def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> s
                 provider_manager.groq_pool.mark_rate_limited(groq_key, cooldown_seconds=60)
             errors.append(f"Groq: {str(e)}")
 
-    # 3. Exhaust all available keys in OpenRouter Pool
     for _ in range(len(provider_manager.openrouter_pool.keys)):
         or_key = provider_manager.openrouter_pool.get_key()
         if not or_key:
@@ -221,7 +219,7 @@ def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> s
 
 @app.get("/")
 def read_root():
-    return {"message": "SnapTex API (Batch OCR + Native DOCX Export + Pooled Multi-Provider AI Copilot) is online and healthy!"}
+    return {"message": "SnapTex API (Batch OCR + Multi-Format Export + Pooled AI Copilot) is online and healthy!"}
 
 
 @app.post("/process-document")
@@ -348,17 +346,61 @@ async def ai_assist(
         raise HTTPException(status_code=500, detail=f"AI Copilot failed: {str(e)}")
 
 
-@app.post("/export-docx")
-def export_docx(
-    payload: ExportDocxRequest,
-    authorization: str = Header(...)
-):
-    """Converts Markdown + LaTeX into a real Microsoft Word (.docx) file with native math equations."""
-    verify_token(authorization)
+def _build_export_bytes(title: str, markdown_content: str, fmt: str) -> tuple[bytes, str, str]:
+    """Converts Markdown + LaTeX into .docx, .tex, or .pdf bytes."""
+    safe_title = re.sub(r'[\\/*?:"<>|]', "_", title.strip() or "SnapTex_Document")
+    md_content = f"# {title.strip()}\n\n{markdown_content}"
+    fmt = fmt.lower().strip()
 
-    safe_title = re.sub(r'[\\/*?:"<>|]', "_", payload.title.strip() or "SnapTex_Document")
-    md_content = f"# {payload.title.strip()}\n\n{payload.markdown_content}"
+    if fmt == "tex":
+        try:
+            tex_body = pypandoc.convert_text(
+                md_content,
+                "latex",
+                format="markdown+tex_math_dollars",
+            )
+        except Exception:
+            tex_body = md_content
 
+        standalone_tex = (
+            "\\documentclass[12pt,a4paper]{article}\n"
+            "\\usepackage[utf8]{inputenc}\n"
+            "\\usepackage[T1]{fontenc}\n"
+            "\\usepackage{amsmath,amssymb,amsthm,geometry}\n"
+            "\\geometry{margin=1in}\n"
+            f"\\title{{{title.strip()}}}\n"
+            "\\date{}\n"
+            "\\begin{document}\n"
+            "\\maketitle\n\n"
+            f"{tex_body}\n\n"
+            "\\end{document}\n"
+        )
+        return standalone_tex.encode("utf-8"), "application/x-tex", f"{safe_title}.tex"
+
+    if fmt == "pdf":
+        tmp_pdf_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file:
+                tmp_pdf_path = tmp_file.name
+            pypandoc.convert_text(
+                md_content,
+                "pdf",
+                format="markdown+tex_math_dollars",
+                outputfile=tmp_pdf_path,
+                extra_args=["--pdf-engine=weasyprint"],
+            )
+            with open(tmp_pdf_path, "rb") as f:
+                return f.read(), "application/pdf", f"{safe_title}.pdf"
+        except Exception as pdf_err:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Server PDF engine unavailable ({pdf_err}). Use Print -> Save as PDF or export .docx/.tex."
+            )
+        finally:
+            if tmp_pdf_path and os.path.exists(tmp_pdf_path):
+                os.remove(tmp_pdf_path)
+
+    # Default: .docx
     tmp_docx_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp_file:
@@ -373,12 +415,11 @@ def export_docx(
 
         with open(tmp_docx_path, "rb") as f:
             docx_bytes = f.read()
-
     except Exception as pandoc_err:
         print(f"Pandoc DOCX conversion fallback triggered: {pandoc_err}")
         doc = Document()
-        doc.add_heading(payload.title.strip() or "SnapTex Document", level=1)
-        for line in payload.markdown_content.splitlines():
+        doc.add_heading(title.strip() or "SnapTex Document", level=1)
+        for line in markdown_content.splitlines():
             stripped = line.strip()
             if stripped.startswith("### "):
                 doc.add_heading(stripped[4:], level=3)
@@ -396,12 +437,44 @@ def export_docx(
         if tmp_docx_path and os.path.exists(tmp_docx_path):
             os.remove(tmp_docx_path)
 
+    return (
+        docx_bytes,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        f"{safe_title}.docx",
+    )
+
+
+@app.post("/export-document")
+def export_document(
+    payload: ExportDocumentRequest,
+    authorization: str = Header(...)
+):
+    """Exports document as .docx, .tex, or .pdf."""
+    verify_token(authorization)
+    file_bytes, media_type, filename = _build_export_bytes(
+        payload.title, payload.markdown_content, payload.format
+    )
     return StreamingResponse(
-        io.BytesIO(docx_bytes),
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={
-            "Content-Disposition": f'attachment; filename="{safe_title}.docx"'
-        }
+        io.BytesIO(file_bytes),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/export-docx")
+def export_docx(
+    payload: ExportDocumentRequest,
+    authorization: str = Header(...)
+):
+    """Backward-compatible alias for .docx export."""
+    verify_token(authorization)
+    file_bytes, media_type, filename = _build_export_bytes(
+        payload.title, payload.markdown_content, "docx"
+    )
+    return StreamingResponse(
+        io.BytesIO(file_bytes),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

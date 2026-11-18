@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react'
+import React, { useState, useEffect, useMemo, useRef } from 'react'
 import { useEditor, EditorContent } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
 import Mathematics from '@tiptap/extension-mathematics'
@@ -12,11 +12,12 @@ import 'katex/dist/katex.min.css'
 import {
   Bold, Italic, Heading1, Heading2, List, ListOrdered,
   Table as TableIcon, Sigma, Download, Save, X, Check,
-  Sparkles, ChevronLeft, ChevronRight, BookOpen, Bot, Send, Loader2,
-  Pin, Replace, FileCheck2, ArrowUpRight
+  Sparkles, ChevronLeft, ChevronRight, ChevronDown, BookOpen, Bot, Send, Loader2,
+  Pin, Replace, FileCheck2, ArrowUpRight, FileText, FileCode2, Printer
 } from 'lucide-react'
 import { markdownToHtml, htmlToMarkdown } from '../lib/markdownBridge'
 import { supabase } from '../lib/supabase'
+import type { ExportFormat } from '../App'
 
 interface SnapTexEditorProps {
   initialContent: string
@@ -24,7 +25,7 @@ interface SnapTexEditorProps {
   defaultCopilotOpen?: boolean
   onTitleChange: (title: string) => void
   onSave: (markdown: string) => void
-  onExportDocx: () => void
+  onExport: (format: ExportFormat, latestMarkdown: string) => void
   onOpenGeneratedDoc?: (solutionTitle: string, solutionMarkdown: string) => void
 }
 
@@ -67,7 +68,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
   defaultCopilotOpen = false,
   onTitleChange,
   onSave,
-  onExportDocx,
+  onExport,
   onOpenGeneratedDoc,
 }) => {
   const [mathModal, setMathModal] = useState<MathModalState>({
@@ -77,6 +78,8 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
     latex: '',
   })
   const [previewHtml, setPreviewHtml] = useState('')
+  const [isExportMenuOpen, setIsExportMenuOpen] = useState(false)
+  const exportMenuRef = useRef<HTMLDivElement>(null)
 
   // Book View, Surgical Tagging & Copilot States
   const [isBookView, setIsBookView] = useState(false)
@@ -93,6 +96,16 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
   const pages = useMemo(() => {
     return initialContent.split(/\n\s*---\s*\n/).map(p => p.trim()).filter(Boolean)
   }, [initialContent])
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(event.target as Node)) {
+        setIsExportMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
 
   useEffect(() => {
     if (!mathModal.isOpen) return
@@ -202,6 +215,12 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
     const html = editor.getHTML()
     const md = htmlToMarkdown(html)
     onSave(md)
+  }
+
+  const handleSelectExport = (fmt: ExportFormat) => {
+    setIsExportMenuOpen(false)
+    const latestMarkdown = htmlToMarkdown(editor.getHTML())
+    onExport(fmt, latestMarkdown)
   }
 
   const openInsertMathModal = () => {
@@ -350,9 +369,9 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
   }
 
   return (
-    <div className="relative flex h-full bg-[#1e1e1e] border border-zinc-800 rounded-xl shadow-2xl overflow-hidden">
+    <div className="relative flex h-full bg-[#1e1e1e] border border-zinc-800 rounded-xl shadow-2xl overflow-hidden print:border-none print:shadow-none print:bg-white print:h-auto print:overflow-visible">
       {/* Main Workspace Column */}
-      <div className="flex-1 flex flex-col h-full overflow-hidden">
+      <div className="flex-1 flex flex-col h-full overflow-hidden print:h-auto print:overflow-visible">
         <style>{`
           .snaptex-prose h1 { font-size: 1.75rem; font-weight: 700; margin: 1rem 0 0.5rem; color: #fff; }
           .snaptex-prose h2 { font-size: 1.35rem; font-weight: 600; margin: 0.9rem 0 0.4rem; color: #f4f4f5; }
@@ -380,19 +399,29 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
           .tiptap-mathematics-render:hover {
             background: rgba(244, 63, 94, 0.14) !important;
           }
+
+          @media print {
+            body { background: #fff !important; color: #000 !important; }
+            .snaptex-prose, .snaptex-prose p, .snaptex-prose h1, .snaptex-prose h2, .snaptex-prose h3,
+            .snaptex-prose li, .snaptex-prose td, .snaptex-prose th,
+            .snaptex-prose [data-type="inline-math"], .snaptex-prose [data-type="block-math"],
+            .tiptap-mathematics-render, .katex {
+              color: #000 !important;
+            }
+          }
         `}</style>
 
         {/* Top Header & Toolbar */}
-        <div className="flex items-center justify-between px-6 py-3.5 bg-[#252525] border-b border-zinc-800">
+        <div className="flex items-center justify-between px-6 py-3.5 bg-[#252525] border-b border-zinc-800 print:bg-white print:border-zinc-300">
           <input
             type="text"
             value={title}
             onChange={(e) => onTitleChange(e.target.value)}
             placeholder="Untitled Document..."
-            className="bg-transparent text-xl font-bold text-white focus:outline-none w-1/3 placeholder:text-zinc-600"
+            className="bg-transparent text-xl font-bold text-white print:text-black focus:outline-none w-1/3 print:w-full placeholder:text-zinc-600"
           />
 
-          <div className="flex items-center space-x-2.5">
+          <div className="flex items-center space-x-2.5 print:hidden">
             <button
               onClick={() => setIsBookView(!isBookView)}
               className={`flex items-center space-x-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
@@ -413,13 +442,63 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
               <span>AI Copilot</span>
             </button>
 
-            <button
-              onClick={onExportDocx}
-              className="flex items-center space-x-1.5 px-3.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-sm font-medium rounded-lg transition-colors border border-zinc-700"
-            >
-              <Download className="w-4 h-4 text-rose-400" />
-              <span>Export Word</span>
-            </button>
+            {/* Multi-Format Export Dropdown */}
+            <div className="relative" ref={exportMenuRef}>
+              <button
+                onClick={() => setIsExportMenuOpen(prev => !prev)}
+                className="flex items-center space-x-1.5 px-3.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-sm font-medium rounded-lg transition-colors border border-zinc-700"
+              >
+                <Download className="w-4 h-4 text-rose-400" />
+                <span>Export</span>
+                <ChevronDown className="w-3.5 h-3.5 text-zinc-400" />
+              </button>
+
+              {isExportMenuOpen && (
+                <div className="absolute right-0 mt-2 w-56 bg-[#242424] border border-zinc-700 rounded-xl shadow-2xl py-1.5 z-50 text-xs">
+                  <button
+                    onClick={() => handleSelectExport('docx')}
+                    className="w-full px-3.5 py-2.5 text-left hover:bg-zinc-800 flex items-center space-x-2.5 text-zinc-200"
+                  >
+                    <FileText className="w-4 h-4 text-blue-400 shrink-0" />
+                    <div>
+                      <div className="font-semibold">Microsoft Word (.docx)</div>
+                      <div className="text-[10px] text-zinc-400">Native editable Word equations</div>
+                    </div>
+                  </button>
+                  <button
+                    onClick={() => handleSelectExport('pdf')}
+                    className="w-full px-3.5 py-2.5 text-left hover:bg-zinc-800 flex items-center space-x-2.5 text-zinc-200"
+                  >
+                    <Printer className="w-4 h-4 text-rose-400 shrink-0" />
+                    <div>
+                      <div className="font-semibold">Typeset PDF (.pdf)</div>
+                      <div className="text-[10px] text-zinc-400">Print-ready KaTeX document</div>
+                    </div>
+                  </button>
+                  <button
+                    onClick={() => handleSelectExport('tex')}
+                    className="w-full px-3.5 py-2.5 text-left hover:bg-zinc-800 flex items-center space-x-2.5 text-zinc-200"
+                  >
+                    <FileCode2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <div>
+                      <div className="font-semibold">LaTeX Source (.tex)</div>
+                      <div className="text-[10px] text-zinc-400">Overleaf / TeXstudio ready</div>
+                    </div>
+                  </button>
+                  <button
+                    onClick={() => handleSelectExport('md')}
+                    className="w-full px-3.5 py-2.5 text-left hover:bg-zinc-800 flex items-center space-x-2.5 text-zinc-200"
+                  >
+                    <Download className="w-4 h-4 text-amber-400 shrink-0" />
+                    <div>
+                      <div className="font-semibold">Markdown + Math (.md)</div>
+                      <div className="text-[10px] text-zinc-400">Obsidian / Notion / GitHub</div>
+                    </div>
+                  </button>
+                </div>
+              )}
+            </div>
+
             <button
               onClick={handleSaveClick}
               className="flex items-center space-x-1.5 px-4 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-sm font-medium rounded-lg transition-colors shadow-lg shadow-rose-600/20"
@@ -432,7 +511,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
 
         {/* Book View Pagination Bar */}
         {isBookView && pages.length > 1 && (
-          <div className="flex items-center justify-between px-6 py-2 bg-[#222222] border-b border-zinc-800 text-xs text-zinc-300">
+          <div className="flex items-center justify-between px-6 py-2 bg-[#222222] border-b border-zinc-800 text-xs text-zinc-300 print:hidden">
             <button
               onClick={() => setCurrentPageIndex(prev => Math.max(0, prev - 1))}
               disabled={currentPageIndex === 0}
@@ -456,7 +535,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
         )}
 
         {/* Formatting & Surgical Tagging Bar */}
-        <div className="flex items-center justify-between px-6 py-2 bg-[#222222] border-b border-zinc-800/80 overflow-x-auto text-zinc-400">
+        <div className="flex items-center justify-between px-6 py-2 bg-[#222222] border-b border-zinc-800/80 overflow-x-auto text-zinc-400 print:hidden">
           <div className="flex items-center space-x-1">
             <button
               onClick={() => editor.chain().focus().toggleBold().run()}
@@ -535,14 +614,14 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
         </div>
 
         {/* Editor Canvas */}
-        <div className="flex-1 overflow-y-auto bg-[#191919]">
+        <div className="flex-1 overflow-y-auto bg-[#191919] print:bg-white print:overflow-visible">
           <EditorContent editor={editor} />
         </div>
       </div>
 
       {/* AI Copilot Slide-Out Drawer */}
       {isCopilotOpen && (
-        <aside className="w-96 bg-[#222222] border-l border-zinc-800 flex flex-col justify-between shadow-2xl z-20">
+        <aside className="w-96 bg-[#222222] border-l border-zinc-800 flex flex-col justify-between shadow-2xl z-20 print:hidden">
           <div>
             <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
               <div className="flex items-center space-x-2">
@@ -662,7 +741,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                   </button>
                 )}
 
-                {/* KaTeX-Rendered Explanation (No Raw LaTeX!) */}
+                {/* KaTeX-Rendered Explanation */}
                 <div
                   className="snaptex-prose text-xs leading-relaxed text-zinc-200 [&>p]:my-1.5"
                   dangerouslySetInnerHTML={{

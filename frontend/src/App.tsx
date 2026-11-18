@@ -13,6 +13,8 @@ interface DocumentItem {
   created_at: string
 }
 
+export type ExportFormat = 'docx' | 'pdf' | 'tex' | 'md'
+
 function formatApiError(errData: any, fallback: string): string {
   if (!errData?.detail) return fallback
   if (typeof errData.detail === 'string') return errData.detail
@@ -66,9 +68,7 @@ export default function App() {
       if (!token) return
 
       const res = await fetch(`${API_URL}/history`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { Authorization: `Bearer ${token}` },
       })
 
       if (res.ok) {
@@ -131,9 +131,7 @@ export default function App() {
 
       const res = await fetch(`${API_URL}/process-document`, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { Authorization: `Bearer ${token}` },
         body: formData,
       })
 
@@ -166,7 +164,6 @@ export default function App() {
     }
   }
 
-  // Opens a Copilot-generated Solution File in the editor while keeping the Copilot drawer open
   const handleOpenGeneratedDoc = (solutionTitle: string, solutionMarkdown: string) => {
     const newSolutionDoc: DocumentItem = {
       id: `sol-${Date.now()}`,
@@ -262,13 +259,36 @@ export default function App() {
     }
   }
 
-  const handleExportDocx = async () => {
+  const handleExportDocument = async (format: ExportFormat, latestMarkdown: string) => {
     if (!currentDoc) return
+
+    // 1. Instant client-side Markdown (.md) download
+    if (format === 'md') {
+      const mdFile = `# ${currentDoc.title}\n\n${latestMarkdown}`
+      const blob = new Blob([mdFile], { type: 'text/markdown;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${currentDoc.title}.md`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+      return
+    }
+
+    // 2. Typeset Print-to-PDF (preserves exact KaTeX fonts & diagrams cleanly)
+    if (format === 'pdf') {
+      window.print()
+      return
+    }
+
+    // 3. Backend Pandoc conversion for .docx and .tex
     try {
       const token = await getAuthToken()
       if (!token) throw new Error('Session expired. Please sign in again.')
 
-      const res = await fetch(`${API_URL}/export-docx`, {
+      const res = await fetch(`${API_URL}/export-document`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -276,27 +296,28 @@ export default function App() {
         },
         body: JSON.stringify({
           title: currentDoc.title,
-          markdown_content: currentDoc.content,
+          markdown_content: latestMarkdown,
+          format,
         }),
       })
 
       if (!res.ok) {
         const errData = await res.json().catch(() => null)
-        throw new Error(formatApiError(errData, 'Failed to generate Word document.'))
+        throw new Error(formatApiError(errData, `Failed to generate .${format} file.`))
       }
 
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `${currentDoc.title}.docx`
+      a.download = `${currentDoc.title}.${format}`
       document.body.appendChild(a)
       a.click()
       a.remove()
       URL.revokeObjectURL(url)
     } catch (err: any) {
-      console.error('DOCX export failed:', err)
-      alert(err.message || 'Failed to export .docx file.')
+      console.error(`Export .${format} failed:`, err)
+      alert(err.message || `Failed to export .${format} file.`)
     }
   }
 
@@ -356,8 +377,8 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-screen bg-[#191919] overflow-hidden">
-      <aside className="w-72 bg-[#202020] border-r border-zinc-800 flex flex-col justify-between">
+    <div className="flex h-screen bg-[#191919] overflow-hidden print:h-auto print:overflow-visible print:bg-white">
+      <aside className="w-72 bg-[#202020] border-r border-zinc-800 flex flex-col justify-between print:hidden">
         <div>
           <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
             <div className="flex items-center space-x-2">
@@ -463,7 +484,7 @@ export default function App() {
         </div>
       </aside>
 
-      <main className="flex-1 p-8 overflow-y-auto">
+      <main className="flex-1 p-8 overflow-y-auto print:p-0 print:overflow-visible">
         {currentDoc ? (
           <SnapTexEditor
             key={currentDoc.id}
@@ -472,7 +493,7 @@ export default function App() {
             defaultCopilotOpen={keepCopilotOpenOnSwitch}
             onTitleChange={newTitle => setCurrentDoc({ ...currentDoc, title: newTitle })}
             onSave={handleSaveDoc}
-            onExportDocx={handleExportDocx}
+            onExport={handleExportDocument}
             onOpenGeneratedDoc={handleOpenGeneratedDoc}
           />
         ) : (
