@@ -94,6 +94,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
   const [isCopilotLoading, setIsCopilotLoading] = useState(false)
   const [copilotResponse, setCopilotResponse] = useState<any>(null)
   const [taggedSpot, setTaggedSpot] = useState<TaggedSpot | null>(null)
+  const [, forceToolbarUpdate] = useState(0)
 
   const API_URL = import.meta.env.VITE_API_URL || 'https://snaptex.onrender.com'
 
@@ -126,7 +127,11 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
 
   const editor = useEditor({
     extensions: [
-      StarterKit,
+      StarterKit.configure({
+        heading: {
+          levels: [1, 2, 3],
+        },
+      }),
       Mathematics.configure({
         inlineOptions: {
           onClick: (node, pos) => {
@@ -158,6 +163,8 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
       Image.configure({ inline: false, allowBase64: true }),
     ],
     content: markdownToHtml(isBookView && pages.length > 0 ? pages[currentPageIndex] : initialContent),
+    onSelectionUpdate: () => forceToolbarUpdate(n => n + 1),
+    onTransaction: () => forceToolbarUpdate(n => n + 1),
     editorProps: {
       attributes: {
         class: 'snaptex-prose focus:outline-none max-w-none min-h-[60vh] px-4 sm:px-8 py-5 sm:py-6 text-zinc-100',
@@ -404,10 +411,12 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
       {/* Main Workspace Column */}
       <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden print:h-auto print:overflow-visible">
         <style>{`
-          .snaptex-prose h1 { font-size: 1.75rem; font-weight: 700; margin: 1rem 0 0.5rem; color: #fff; }
-          .snaptex-prose h2 { font-size: 1.35rem; font-weight: 600; margin: 0.9rem 0 0.4rem; color: #f4f4f5; }
-          .snaptex-prose h3 { font-size: 1.15rem; font-weight: 600; margin: 0.75rem 0 0.35rem; color: #e4e4e7; }
+          .snaptex-prose h1 { font-size: 1.85rem; font-weight: 800; line-height: 1.25; margin: 1.1rem 0 0.5rem; color: #ffffff; }
+          .snaptex-prose h2 { font-size: 1.4rem; font-weight: 700; line-height: 1.3; margin: 0.95rem 0 0.4rem; color: #f4f4f5; }
+          .snaptex-prose h3 { font-size: 1.15rem; font-weight: 600; line-height: 1.35; margin: 0.75rem 0 0.35rem; color: #e4e4e7; }
           .snaptex-prose p { margin: 0.5rem 0; line-height: 1.7; color: #e4e4e7; }
+          .snaptex-prose strong, .snaptex-prose b { font-weight: 700 !important; color: #ffffff; }
+          .snaptex-prose em, .snaptex-prose i { font-style: italic !important; color: #fafafa; }
           .snaptex-prose ul { list-style-type: disc; padding-left: 1.5rem; margin: 0.5rem 0; }
           .snaptex-prose ol { list-style-type: decimal; padding-left: 1.5rem; margin: 0.5rem 0; }
           .snaptex-prose table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
@@ -434,6 +443,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
           @media print {
             body { background: #fff !important; color: #000 !important; }
             .snaptex-prose, .snaptex-prose p, .snaptex-prose h1, .snaptex-prose h2, .snaptex-prose h3,
+            .snaptex-prose strong, .snaptex-prose em,
             .snaptex-prose li, .snaptex-prose td, .snaptex-prose th,
             .snaptex-prose [data-type="inline-math"], .snaptex-prose [data-type="block-math"],
             .tiptap-mathematics-render, .katex {
@@ -454,6 +464,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
 
           <div className="flex flex-wrap items-center gap-2 print:hidden">
             <button
+              type="button"
               onClick={() => setIsBookView(!isBookView)}
               className={`flex items-center space-x-1.5 px-2.5 sm:px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
                 isBookView
@@ -466,6 +477,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
             </button>
 
             <button
+              type="button"
               onClick={handleToggleCopilot}
               className="flex items-center space-x-1.5 px-3 py-1.5 bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 text-xs sm:text-sm font-medium rounded-lg transition-colors border border-rose-500/40"
             >
@@ -476,6 +488,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
             {/* Multi-Format Export Dropdown */}
             <div className="relative" ref={exportMenuRef}>
               <button
+                type="button"
                 onClick={() => setIsExportMenuOpen(prev => !prev)}
                 className="flex items-center space-x-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs sm:text-sm font-medium rounded-lg transition-colors border border-zinc-700"
               >
@@ -487,6 +500,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
               {isExportMenuOpen && (
                 <div className="absolute right-0 mt-2 w-60 bg-[#242424] border border-zinc-700 rounded-xl shadow-2xl py-1.5 z-50 text-xs">
                   <button
+                    type="button"
                     onClick={() => handleSelectExport('docx')}
                     className="w-full px-3.5 py-2.5 text-left hover:bg-zinc-800 flex items-center space-x-2.5 text-zinc-200"
                   >
@@ -497,6 +511,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                     </div>
                   </button>
                   <button
+                    type="button"
                     onClick={() => handleSelectExport('pdf')}
                     className="w-full px-3.5 py-2.5 text-left hover:bg-zinc-800 flex items-center space-x-2.5 text-zinc-200"
                   >
@@ -507,6 +522,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                     </div>
                   </button>
                   <button
+                    type="button"
                     onClick={() => handleSelectExport('tex')}
                     className="w-full px-3.5 py-2.5 text-left hover:bg-zinc-800 flex items-center space-x-2.5 text-zinc-200"
                   >
@@ -517,6 +533,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                     </div>
                   </button>
                   <button
+                    type="button"
                     onClick={() => handleSelectExport('md')}
                     className="w-full px-3.5 py-2.5 text-left hover:bg-zinc-800 flex items-center space-x-2.5 text-zinc-200"
                   >
@@ -531,6 +548,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
             </div>
 
             <button
+              type="button"
               onClick={handleSaveClick}
               className="flex items-center space-x-1.5 px-3.5 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs sm:text-sm font-medium rounded-lg transition-colors shadow-lg shadow-rose-600/20"
             >
@@ -544,6 +562,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
         {isBookView && pages.length > 1 && (
           <div className="flex items-center justify-between px-4 sm:px-6 py-2 bg-[#222222] border-b border-zinc-800 text-xs text-zinc-300 print:hidden">
             <button
+              type="button"
               onClick={() => setCurrentPageIndex(prev => Math.max(0, prev - 1))}
               disabled={currentPageIndex === 0}
               className="flex items-center space-x-1 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 rounded transition-colors"
@@ -555,6 +574,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
               {t.pageOf(currentPageIndex + 1, pages.length)}
             </span>
             <button
+              type="button"
               onClick={() => setCurrentPageIndex(prev => Math.min(pages.length - 1, prev + 1))}
               disabled={currentPageIndex === pages.length - 1}
               className="flex items-center space-x-1 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 rounded transition-colors"
@@ -569,52 +589,91 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
         <div className="flex items-center justify-between gap-2 px-4 sm:px-6 py-2 bg-[#222222] border-b border-zinc-800/80 overflow-x-auto text-zinc-400 print:hidden">
           <div className="flex items-center space-x-1 shrink-0">
             <button
-              onClick={() => editor.chain().focus().toggleBold().run()}
-              className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('bold') ? 'bg-zinc-700 text-white' : ''}`}
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault()
+                editor.chain().focus().toggleBold().run()
+              }}
+              className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('bold') ? 'bg-rose-600/30 text-rose-300 border border-rose-500/40' : ''}`}
+              title="Bold (Ctrl+B)"
             >
               <Bold className="w-4 h-4" />
             </button>
             <button
-              onClick={() => editor.chain().focus().toggleItalic().run()}
-              className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('italic') ? 'bg-zinc-700 text-white' : ''}`}
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault()
+                editor.chain().focus().toggleItalic().run()
+              }}
+              className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('italic') ? 'bg-rose-600/30 text-rose-300 border border-rose-500/40' : ''}`}
+              title="Italic (Ctrl+I)"
             >
               <Italic className="w-4 h-4" />
             </button>
             <div className="w-[1px] h-4 bg-zinc-700 mx-1" />
             <button
-              onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
-              className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('heading', { level: 1 }) ? 'bg-zinc-700 text-white' : ''}`}
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault()
+                editor.chain().focus().toggleHeading({ level: 1 }).run()
+              }}
+              className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('heading', { level: 1 }) ? 'bg-rose-600/30 text-rose-300 border border-rose-500/40' : ''}`}
+              title="Heading 1"
             >
               <Heading1 className="w-4 h-4" />
             </button>
             <button
-              onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
-              className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('heading', { level: 2 }) ? 'bg-zinc-700 text-white' : ''}`}
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault()
+                editor.chain().focus().toggleHeading({ level: 2 }).run()
+              }}
+              className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('heading', { level: 2 }) ? 'bg-rose-600/30 text-rose-300 border border-rose-500/40' : ''}`}
+              title="Heading 2"
             >
               <Heading2 className="w-4 h-4" />
             </button>
             <div className="w-[1px] h-4 bg-zinc-700 mx-1" />
             <button
-              onClick={() => editor.chain().focus().toggleBulletList().run()}
-              className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('bulletList') ? 'bg-zinc-700 text-white' : ''}`}
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault()
+                editor.chain().focus().toggleBulletList().run()
+              }}
+              className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('bulletList') ? 'bg-rose-600/30 text-rose-300 border border-rose-500/40' : ''}`}
+              title="Bullet List"
             >
               <List className="w-4 h-4" />
             </button>
             <button
-              onClick={() => editor.chain().focus().toggleOrderedList().run()}
-              className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('orderedList') ? 'bg-zinc-700 text-white' : ''}`}
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault()
+                editor.chain().focus().toggleOrderedList().run()
+              }}
+              className={`p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors ${editor.isActive('orderedList') ? 'bg-rose-600/30 text-rose-300 border border-rose-500/40' : ''}`}
+              title="Numbered List"
             >
               <ListOrdered className="w-4 h-4" />
             </button>
             <div className="w-[1px] h-4 bg-zinc-700 mx-1" />
             <button
-              onClick={() => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault()
+                editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()
+              }}
               className="p-1.5 rounded hover:bg-zinc-700 hover:text-white transition-colors"
+              title="Insert Table"
             >
               <TableIcon className="w-4 h-4" />
             </button>
             <button
-              onClick={openInsertMathModal}
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault()
+                openInsertMathModal()
+              }}
               className="flex items-center space-x-1 px-2 py-1 rounded hover:bg-zinc-700 hover:text-white transition-colors text-xs font-medium"
             >
               <Sigma className="w-4 h-4 text-rose-400" />
@@ -623,7 +682,11 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
           </div>
 
           <button
-            onClick={handleTagSpot}
+            type="button"
+            onMouseDown={(e) => {
+              e.preventDefault()
+              handleTagSpot()
+            }}
             className={`flex items-center space-x-1.5 px-3 py-1 rounded-lg text-xs font-medium transition-colors border shrink-0 ${
               taggedSpot
                 ? 'bg-amber-500/20 border-amber-500/60 text-amber-300'
@@ -651,6 +714,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                 <h3 className="font-semibold text-white text-sm">{t.copilotTitle}</h3>
               </div>
               <button
+                type="button"
                 onClick={() => setIsCopilotOpen(false)}
                 className="p-1.5 rounded-lg bg-zinc-800 md:bg-transparent text-zinc-300 hover:text-white"
               >
@@ -661,6 +725,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
             {/* 4 Copilot Mode Tabs */}
             <div className="p-2.5 border-b border-zinc-800 grid grid-cols-4 gap-1 bg-[#1c1c1c]">
               <button
+                type="button"
                 onClick={() => setCopilotMode('explain')}
                 className={`py-1.5 text-[11px] font-medium rounded-md transition-colors ${
                   copilotMode === 'explain' ? 'bg-rose-600 text-white' : 'text-zinc-400 hover:text-white'
@@ -669,6 +734,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                 {t.modeExplain}
               </button>
               <button
+                type="button"
                 onClick={() => setCopilotMode('fix_ocr')}
                 className={`py-1.5 text-[11px] font-medium rounded-md transition-colors ${
                   copilotMode === 'fix_ocr' ? 'bg-rose-600 text-white' : 'text-zinc-400 hover:text-white'
@@ -677,6 +743,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                 {t.modeFixLatex}
               </button>
               <button
+                type="button"
                 onClick={() => setCopilotMode('exercise')}
                 className={`py-1.5 text-[11px] font-medium rounded-md transition-colors ${
                   copilotMode === 'exercise' ? 'bg-rose-600 text-white' : 'text-zinc-400 hover:text-white'
@@ -685,6 +752,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                 {t.modeExercises}
               </button>
               <button
+                type="button"
                 onClick={() => setCopilotMode('solution')}
                 className={`py-1.5 text-[11px] font-medium rounded-md transition-colors ${
                   copilotMode === 'solution' ? 'bg-rose-600 text-white' : 'text-zinc-400 hover:text-white'
@@ -705,6 +773,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                     <span className="line-clamp-2 italic">"{taggedSpot.previewText}"</span>
                   </div>
                   <button
+                    type="button"
                     onClick={() => setTaggedSpot(null)}
                     className="text-amber-400/70 hover:text-amber-200 shrink-0"
                   >
@@ -715,6 +784,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                 <div className="flex items-center justify-between text-[11px] text-zinc-400">
                   <span>{t.pinHint}</span>
                   <button
+                    type="button"
                     onClick={handleTagSpot}
                     className="ml-2 px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-amber-300 rounded font-medium shrink-0"
                   >
@@ -739,6 +809,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
 
                 {typeof copilotResponse === 'object' && copilotResponse.solution_markdown && (
                   <button
+                    type="button"
                     onClick={handleOpenSolutionInWorkspace}
                     className="w-full text-left p-3 rounded-xl bg-rose-600/20 hover:bg-rose-600/30 border border-rose-500/50 transition-all group flex items-center justify-between shadow-lg"
                   >
@@ -780,6 +851,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                       }}
                     />
                     <button
+                      type="button"
                       onClick={handleApplySurgicalPatch}
                       className="w-full flex items-center justify-center space-x-1.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium rounded-lg transition-colors"
                     >
@@ -790,6 +862,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
                 )}
 
                 <button
+                  type="button"
                   onClick={handleInsertExplanation}
                   className="w-full mt-2 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium rounded-lg transition-colors border border-zinc-700"
                 >
