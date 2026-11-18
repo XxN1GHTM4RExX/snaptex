@@ -16,6 +16,7 @@ from docx import Document
 
 from ocr_engine import process_image_with_gemini
 from blur_detector import calculate_blur_score
+from key_manager import provider_manager
 from database import (
     save_transcription,
     fetch_recent_transcriptions,
@@ -24,7 +25,7 @@ from database import (
     update_transcription_content
 )
 
-app = FastAPI(title="SnapTex API", version="1.6")
+app = FastAPI(title="SnapTex API", version="1.7")
 
 app.add_middleware(
     CORSMiddleware,
@@ -101,31 +102,44 @@ def pdf_bytes_to_png_pages(pdf_bytes: bytes, max_pages: int = MAX_PAGES) -> List
 
 
 def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> str:
-    """Tries Gemini 3.8 Flash -> Groq -> OpenRouter with strict JSON output."""
+    """Uses provider_manager key pools: Gemini 3.8+ -> Groq -> OpenRouter with strict JSON output."""
+    provider_manager.reload_all()
     errors = []
 
-    # 1. Try Gemini 3.8 Flash
-    gemini_key = os.getenv("GEMINI_API_KEY")
-    if gemini_key:
+    # 1. Exhaust all available keys in Google Pool
+    for _ in range(len(provider_manager.google_pool.keys)):
+        g_key = provider_manager.google_pool.get_key()
+        if not g_key:
+            break
         try:
             from google import genai
-            client = genai.Client(api_key=gemini_key)
-            response = client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=context_prompt,
-                config={
-                    "system_instruction": system_instruction,
-                    "response_mime_type": "application/json",
-                },
-            )
-            if response.text:
-                return response.text
+            from google.genai.errors import APIError
+            client = genai.Client(api_key=g_key, http_options={"timeout": 45000})
+            for model_name in ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro-preview"]:
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=context_prompt,
+                        config={
+                            "system_instruction": system_instruction,
+                            "response_mime_type": "application/json",
+                        },
+                    )
+                    if response.text:
+                        return response.text
+                except APIError as e:
+                    errors.append(f"Google({model_name}): {e.code}")
+                    if e.code == 429 or "quota" in str(e).lower():
+                        provider_manager.google_pool.mark_rate_limited(g_key, cooldown_seconds=60)
+                        break
         except Exception as e:
-            errors.append(f"Gemini failed: {str(e)}")
+            errors.append(f"GoogleClient: {str(e)}")
 
-    # 2. Fallback to Groq (Llama 3.3 70B Versatile)
-    groq_key = os.getenv("GROQ_API_KEY")
-    if groq_key:
+    # 2. Exhaust all available keys in Groq Pool
+    for _ in range(len(provider_manager.groq_pool.keys)):
+        groq_key = provider_manager.groq_pool.get_key()
+        if not groq_key:
+            break
         try:
             req_body = json.dumps({
                 "model": "llama-3.3-70b-versatile",
@@ -150,11 +164,15 @@ def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> s
                 data = json.loads(resp.read().decode("utf-8"))
                 return data["choices"][0]["message"]["content"]
         except Exception as e:
-            errors.append(f"Groq failed: {str(e)}")
+            if "429" in str(e):
+                provider_manager.groq_pool.mark_rate_limited(groq_key, cooldown_seconds=60)
+            errors.append(f"Groq: {str(e)}")
 
-    # 3. Fallback to OpenRouter
-    openrouter_key = os.getenv("OPENROUTER_API_KEY")
-    if openrouter_key:
+    # 3. Exhaust all available keys in OpenRouter Pool
+    for _ in range(len(provider_manager.openrouter_pool.keys)):
+        or_key = provider_manager.openrouter_pool.get_key()
+        if not or_key:
+            break
         try:
             req_body = json.dumps({
                 "model": "qwen/qwen-2.5-72b-instruct:free",
@@ -170,7 +188,7 @@ def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> s
                 "https://openrouter.ai/api/v1/chat/completions",
                 data=req_body,
                 headers={
-                    "Authorization": f"Bearer {openrouter_key}",
+                    "Authorization": f"Bearer {or_key}",
                     "Content-Type": "application/json",
                     "HTTP-Referer": "https://snaptex-web.onrender.com",
                     "X-Title": "SnapTex AI Copilot",
@@ -181,14 +199,16 @@ def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> s
                 data = json.loads(resp.read().decode("utf-8"))
                 return data["choices"][0]["message"]["content"]
         except Exception as e:
-            errors.append(f"OpenRouter failed: {str(e)}")
+            if "429" in str(e):
+                provider_manager.openrouter_pool.mark_rate_limited(or_key, cooldown_seconds=60)
+            errors.append(f"OpenRouter: {str(e)}")
 
     raise RuntimeError(" | ".join(errors) if errors else "No AI provider API keys configured.")
 
 
 @app.get("/")
 def read_root():
-    return {"message": "SnapTex API (Batch OCR + Native DOCX Export + Multi-Provider AI Copilot) is online and healthy!"}
+    return {"message": "SnapTex API (Batch OCR + Native DOCX Export + Pooled Multi-Provider AI Copilot) is online and healthy!"}
 
 
 @app.post("/process-document")
@@ -285,7 +305,7 @@ async def ai_assist(
     payload: AIAssistRequest,
     authorization: str = Header(...)
 ):
-    """Surgical AI Copilot endpoint with Gemini 3.8 -> Groq -> OpenRouter fallback."""
+    """Surgical AI Copilot endpoint backed by pooled Gemini 3.8+ -> Groq -> OpenRouter."""
     verify_token(authorization)
 
     try:
