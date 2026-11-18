@@ -1,37 +1,88 @@
 import { marked } from 'marked'
 
+function escapeHtmlAttr(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+}
+
+function unescapeHtmlAttr(str: string): string {
+  return str
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+}
+
 /**
  * Converts backend Markdown (containing LaTeX math, Markdown tables, and Base64 images)
- * into clean HTML that TipTap's editor can ingest.
+ * into clean HTML that TipTap v3 (@tiptap/extension-mathematics) parses into live KaTeX nodes.
  */
 export function markdownToHtml(markdown: string): string {
   if (!markdown) return '<p></p>'
 
-  // Pre-process display math $$...$$ and inline math $...$ for KaTeX / mathematics extension
-  let processed = markdown
-    .replace(/\$\$([\s\S]*?)\$\$/g, (_, math) => `<div data-type="mathematics" data-latex="${encodeURIComponent(math.trim())}">$$${math}$$</div>`)
-    .replace(/\$([^$]+?)\$/g, (_, math) => `<span data-type="mathematics" data-latex="${encodeURIComponent(math.trim())}">$${math}$</span>`)
+  const mathBlocks: string[] = []
+  const inlineMaths: string[] = []
 
-  // Parse markdown to HTML using marked
-  const rawHtml = marked.parse(processed, { async: false }) as string
-  return rawHtml
+  // 1. Protect block math $$...$$ BEFORE marked.parse() touches underscores/backslashes
+  let protectedMd = markdown.replace(/\$\$([\s\S]*?)\$\$/g, (_, math) => {
+    const idx = mathBlocks.push(math.trim()) - 1
+    return `\n\n@@BLOCK_MATH_${idx}@@\n\n`
+  })
+
+  // 2. Protect inline math $...$
+  protectedMd = protectedMd.replace(/\$([^\$\n]+?)\$/g, (_, math) => {
+    const idx = inlineMaths.push(math.trim()) - 1
+    return `@@INLINE_MATH_${idx}@@`
+  })
+
+  // 3. Parse remaining Markdown (headings, lists, tables, bold, italic, images)
+  let html = marked.parse(protectedMd, { async: false }) as string
+
+  // 4. Restore TipTap v3 block-math and inline-math nodes
+  html = html.replace(/<p>\s*@@BLOCK_MATH_(\d+)@@\s*<\/p>/g, (_, idx) => {
+    const latex = escapeHtmlAttr(mathBlocks[Number(idx)] || '')
+    return `<div data-type="block-math" data-latex="${latex}"></div>`
+  })
+
+  html = html.replace(/@@BLOCK_MATH_(\d+)@@/g, (_, idx) => {
+    const latex = escapeHtmlAttr(mathBlocks[Number(idx)] || '')
+    return `<div data-type="block-math" data-latex="${latex}"></div>`
+  })
+
+  html = html.replace(/@@INLINE_MATH_(\d+)@@/g, (_, idx) => {
+    const latex = escapeHtmlAttr(inlineMaths[Number(idx)] || '')
+    return `<span data-type="inline-math" data-latex="${latex}"></span>`
+  })
+
+  return html
 }
 
 /**
- * Extracts raw markdown/text content back out from TipTap HTML for saving or exporting.
+ * Extracts raw Markdown + LaTeX back out from TipTap HTML for saving or exporting.
  */
 export function htmlToMarkdown(html: string): string {
-  // Simple fallback serializer for saving back to Supabase history or Markdown export
+  if (!html) return ''
+
   return html
-    .replace(/<div[^>]*data-latex="([^"]*)"[^>]*>[\s\S]*?<\/div>/g, (_, latex) => `$$${decodeURIComponent(latex)}$$`)
-    .replace(/<span[^>]*data-latex="([^"]*)"[^>]*>[\s\S]*?<\/span>/g, (_, latex) => `$${decodeURIComponent(latex)}$`)
-    .replace(/<h1>(.*?)<\/h1>/g, '# $1\n')
-    .replace(/<h2>(.*?)<\/h2>/g, '## $1\n')
-    .replace(/<h3>(.*?)<\/h3>/g, '### $1\n')
-    .replace(/<p>(.*?)<\/p>/g, '$1\n\n')
-    .replace(/<strong>(.*?)<\/strong>/g, '**$1**')
-    .replace(/<em>(.*?)<\/em>/g, '*$1*')
-    .replace(/<br\s*[\/]?>/gi, '\n')
-    .replace(/<[^>]+>/g, '') // strip remaining tags
+    // Serialize TipTap v3 block-math & inline-math nodes back to $$...$$ and $...$
+    .replace(/<div[^>]*data-type="block-math"[^>]*data-latex="([^"]*)"[^>]*><\/div>/g, (_, latex) => `\n$$\n${unescapeHtmlAttr(latex)}\n$$\n`)
+    .replace(/<div[^>]*data-latex="([^"]*)"[^>]*data-type="block-math"[^>]*><\/div>/g, (_, latex) => `\n$$\n${unescapeHtmlAttr(latex)}\n$$\n`)
+    .replace(/<span[^>]*data-type="inline-math"[^>]*data-latex="([^"]*)"[^>]*><\/span>/g, (_, latex) => `$${unescapeHtmlAttr(latex)}$`)
+    .replace(/<span[^>]*data-latex="([^"]*)"[^>]*data-type="inline-math"[^>]*><\/span>/g, (_, latex) => `$${unescapeHtmlAttr(latex)}$`)
+    // Standard structural HTML -> Markdown
+    .replace(/<h1[^>]*>(.*?)<\/h1>/gi, '# $1\n\n')
+    .replace(/<h2[^>]*>(.*?)<\/h2>/gi, '## $1\n\n')
+    .replace(/<h3[^>]*>(.*?)<\/h3>/gi, '### $1\n\n')
+    .replace(/<li[^>]*>(.*?)<\/li>/gi, '- $1\n')
+    .replace(/<\/?(ul|ol)[^>]*>/gi, '\n')
+    .replace(/<p[^>]*>(.*?)<\/p>/gi, '$1\n\n')
+    .replace(/<strong>(.*?)<\/strong>/gi, '**$1**')
+    .replace(/<em>(.*?)<\/em>/gi, '*$1*')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\n{3,}/g, '\n\n')
     .trim()
 }

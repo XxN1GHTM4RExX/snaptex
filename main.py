@@ -2,6 +2,7 @@ import io
 import os
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from supabase import create_client
 
 from ocr_engine import process_image_with_gemini
@@ -10,10 +11,11 @@ from database import (
     save_transcription,
     fetch_recent_transcriptions,
     get_supabase_client,
-    update_transcription_filename
+    update_transcription_filename,
+    update_transcription_content
 )
 
-app = FastAPI(title="SnapTex API", version="1.1")
+app = FastAPI(title="SnapTex API", version="1.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,6 +27,11 @@ app.add_middleware(
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+
+class UpdateTranscriptionRequest(BaseModel):
+    markdown_content: str
+    filename: str | None = None
 
 
 def verify_token(authorization: str = Header(...)):
@@ -68,7 +75,7 @@ async def process_document(
         ocr_result = process_image_with_gemini(contents, aggressive_whitening=is_whitening_enabled)
         latex_text = ocr_result.get("latex", "")
 
-        save_transcription(
+        saved_record = save_transcription(
             filename=file.filename,
             markdown_content=latex_text,
             blur_score=blur_score,
@@ -79,6 +86,7 @@ async def process_document(
 
         return {
             "status": "success",
+            "id": saved_record.get("id"),
             "blur_score": blur_score,
             "latex": latex_text,
             "text": ocr_result.get("text", "")
@@ -95,6 +103,32 @@ def get_history(authorization: str = Header(...)):
     auth_data = verify_token(authorization)
     token = auth_data["token"]
     return {"history": fetch_recent_transcriptions(access_token=token, limit=10)}
+
+
+@app.put("/history/{transcription_id}")
+def update_history_item(
+    transcription_id: str,
+    payload: UpdateTranscriptionRequest,
+    authorization: str = Header(...)
+):
+    """Persists edited markdown content and title to Supabase."""
+    auth_data = verify_token(authorization)
+    token = auth_data["token"]
+
+    try:
+        updated_record = update_transcription_content(
+            transcription_id=transcription_id,
+            markdown_content=payload.markdown_content,
+            filename=payload.filename,
+            access_token=token
+        )
+        if not updated_record:
+            raise HTTPException(status_code=404, detail="Record not found or update failed.")
+        return {"status": "success", "data": updated_record}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
 
 
 @app.delete("/history/{transcription_id}")

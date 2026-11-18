@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import {
   FileText, Upload, LogOut, Plus,
-  Loader2, Sparkles, ChevronRight
+  Loader2, Sparkles, Pencil, Trash2
 } from 'lucide-react'
 import { supabase } from './lib/supabase'
 import { SnapTexEditor } from './components/SnapTexEditor'
@@ -117,7 +117,7 @@ export default function App() {
 
       const data = await res.json()
       const newDoc: DocumentItem = {
-        id: String(Date.now()),
+        id: data.id ? String(data.id) : String(Date.now()),
         title: file.name.replace(/\.[^/.]+$/, ''),
         content: data.latex || data.text || '',
         created_at: new Date().toISOString(),
@@ -136,10 +136,85 @@ export default function App() {
 
   const handleSaveDoc = async (markdown: string) => {
     if (!currentDoc) return
-    const updated = { ...currentDoc, content: markdown }
-    setCurrentDoc(updated)
-    setDocuments(documents.map(d => d.id === updated.id ? updated : d))
-    alert('Document updated locally!')
+    try {
+      const token = await getAuthToken()
+      if (!token) throw new Error('Session expired. Please sign in again.')
+
+      const res = await fetch(`${API_URL}/history/${currentDoc.id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          markdown_content: markdown,
+          filename: currentDoc.title,
+        }),
+      })
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => null)
+        throw new Error(errData?.detail || 'Failed to save changes.')
+      }
+
+      const updated = { ...currentDoc, content: markdown }
+      setCurrentDoc(updated)
+      setDocuments(documents.map(d => d.id === updated.id ? updated : d))
+      alert('Saved to Supabase!')
+    } catch (err: any) {
+      console.error('Save failed:', err)
+      alert(err.message || 'Error saving document.')
+    }
+  }
+
+  const handleRenameDoc = async (e: React.MouseEvent, doc: DocumentItem) => {
+    e.stopPropagation()
+    const newTitle = window.prompt('Rename document:', doc.title)?.trim()
+    if (!newTitle || newTitle === doc.title) return
+
+    try {
+      const token = await getAuthToken()
+      if (!token) return
+
+      const res = await fetch(
+        `${API_URL}/history/${doc.id}?new_filename=${encodeURIComponent(newTitle)}`,
+        {
+          method: 'PATCH',
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      )
+
+      if (res.ok) {
+        setDocuments(documents.map(d => d.id === doc.id ? { ...d, title: newTitle } : d))
+        if (currentDoc?.id === doc.id) {
+          setCurrentDoc({ ...currentDoc, title: newTitle })
+        }
+      }
+    } catch (err) {
+      console.error('Rename failed:', err)
+    }
+  }
+
+  const handleDeleteDoc = async (e: React.MouseEvent, docId: string) => {
+    e.stopPropagation()
+    if (!window.confirm('Delete this transcription permanently?')) return
+
+    try {
+      const token = await getAuthToken()
+      if (!token) return
+
+      const res = await fetch(`${API_URL}/history/${docId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+
+      if (res.ok) {
+        setDocuments(documents.filter(d => d.id !== docId))
+        if (currentDoc?.id === docId) setCurrentDoc(null)
+      }
+    } catch (err) {
+      console.error('Delete failed:', err)
+    }
   }
 
   const handleExportDocx = () => {
@@ -266,19 +341,36 @@ export default function App() {
           <div className="overflow-y-auto max-h-[calc(100vh-280px)] px-3 py-2 space-y-1">
             <div className="px-2 py-1 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">History</div>
             {documents.map(doc => (
-              <button
+              <div
                 key={doc.id}
                 onClick={() => setCurrentDoc(doc)}
-                className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors text-left ${
-                  currentDoc?.id === doc.id ? 'bg-rose-600/15 text-rose-300 font-medium' : 'text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200'
+                className={`group w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors cursor-pointer ${
+                  currentDoc?.id === doc.id
+                    ? 'bg-rose-600/15 text-rose-300 font-medium'
+                    : 'text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200'
                 }`}
               >
-                <div className="flex items-center space-x-2 truncate">
+                <div className="flex items-center space-x-2 truncate pr-2">
                   <FileText className="w-4 h-4 shrink-0 text-zinc-500" />
                   <span className="truncate">{doc.title}</span>
                 </div>
-                <ChevronRight className="w-3.5 h-3.5 opacity-50 shrink-0" />
-              </button>
+                <div className="flex items-center space-x-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                  <button
+                    onClick={e => handleRenameDoc(e, doc)}
+                    className="p-1 text-zinc-400 hover:text-white rounded hover:bg-zinc-700"
+                    title="Rename"
+                  >
+                    <Pencil className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={e => handleDeleteDoc(e, doc.id)}
+                    className="p-1 text-zinc-400 hover:text-rose-400 rounded hover:bg-zinc-700"
+                    title="Delete"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
             ))}
           </div>
         </div>

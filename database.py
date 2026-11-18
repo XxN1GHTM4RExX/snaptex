@@ -61,8 +61,12 @@ def update_transcription_filename(transcription_id: str, new_filename: str, acce
     """Updates the filename of a specific transcription record in-place."""
     try:
         supabase = get_supabase_client(access_token=access_token)
-        response = supabase.table("transcriptions").update({"filename": new_filename}).eq("id",
-                                                                                          transcription_id).execute()
+        response = (
+            supabase.table("transcriptions")
+            .update({"filename": new_filename})
+            .eq("id", transcription_id)
+            .execute()
+        )
 
         if response.data and len(response.data) > 0:
             return response.data[0]
@@ -71,4 +75,31 @@ def update_transcription_filename(transcription_id: str, new_filename: str, acce
         return None
     except Exception as e:
         print(f"Database update failed: {e}")
+        return None
+
+
+def update_transcription_content(
+    transcription_id: str,
+    markdown_content: str,
+    filename: str | None,
+    access_token: str
+) -> dict:
+    """Updates the markdown content (and optionally filename) of a transcription record."""
+    try:
+        supabase = get_supabase_client(access_token=access_token)
+        payload = {"markdown_content": markdown_content}
+        if filename is not None:
+            payload["filename"] = filename
+
+        response = (
+            supabase.table("transcriptions")
+            .update(payload)
+            .eq("id", transcription_id)
+            .execute()
+        )
+        if response.data and len(response.data) > 0:
+            return response.data[0]
+        return None
+    except Exception as e:
+        print(f"Database content update failed: {e}")
         return None
