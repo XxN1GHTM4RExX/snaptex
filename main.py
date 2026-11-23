@@ -1,10 +1,11 @@
+import asyncio
 import io
 import json
 import os
 import re
 import tempfile
 import urllib.request
-from typing import List
+from typing import List, Tuple
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -101,6 +102,19 @@ def pdf_bytes_to_png_pages(pdf_bytes: bytes, max_pages: int = MAX_PAGES) -> List
 
     pdf.close()
     return page_images
+
+
+def _process_single_page_sync(
+    idx: int,
+    img_bytes: bytes,
+    is_whitening_enabled: bool
+) -> Tuple[int, float, str, str]:
+    """Runs blur detection + OCR for a single page inside a worker thread."""
+    score = calculate_blur_score(img_bytes)
+    ocr_result = process_image_with_gemini(img_bytes, aggressive_whitening=is_whitening_enabled)
+    page_latex = (ocr_result.get("latex") or "").strip()
+    page_text = (ocr_result.get("text") or "").strip()
+    return idx, score, page_latex, page_text
 
 
 def _extract_clean_json(raw_text: str) -> str:
@@ -292,18 +306,20 @@ async def process_document(
                 detail=f"You uploaded {len(page_buffers)} pages. Maximum allowed is {MAX_PAGES} pages per batch."
             )
 
+        # Process all pages concurrently across worker threads so 5 pages finish in ~1 page's time
+        tasks = [
+            asyncio.to_thread(_process_single_page_sync, idx, img_bytes, is_whitening_enabled)
+            for idx, img_bytes in enumerate(page_buffers, start=1)
+        ]
+        page_results = await asyncio.gather(*tasks)
+        page_results.sort(key=lambda item: item[0])
+
         stitched_latex_parts: List[str] = []
         stitched_text_parts: List[str] = []
         blur_scores: List[float] = []
 
-        for idx, img_bytes in enumerate(page_buffers, start=1):
-            score = calculate_blur_score(img_bytes)
+        for idx, score, page_latex, page_text in page_results:
             blur_scores.append(score)
-
-            ocr_result = process_image_with_gemini(img_bytes, aggressive_whitening=is_whitening_enabled)
-            page_latex = (ocr_result.get("latex") or "").strip()
-            page_text = (ocr_result.get("text") or "").strip()
-
             if len(page_buffers) > 1:
                 stitched_latex_parts.append(f"## Page {idx}\n\n{page_latex}")
                 stitched_text_parts.append(f"--- Page {idx} ---\n{page_text}")

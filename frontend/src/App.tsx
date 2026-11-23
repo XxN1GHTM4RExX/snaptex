@@ -162,7 +162,7 @@ export default function App() {
     )
 
     const controller = new AbortController()
-    const timeoutId = window.setTimeout(() => controller.abort(), 90000) // 90s timeout
+    const timeoutId = window.setTimeout(() => controller.abort(), 180000) // 180s timeout for multi-page batches
 
     try {
       const token = await getAuthToken()
@@ -218,8 +218,8 @@ export default function App() {
       if (err?.name === 'AbortError') {
         setUploadError(
           lang === 'fr'
-            ? 'Délai dépassé (90s). Le serveur redémarrait peut-être ou le réseau est lent — réessayez maintenant.'
-            : 'Upload timed out (90s). The server may have been waking up or cellular data was slow — please try again now.'
+            ? 'Délai dépassé (180s). Le serveur redémarrait peut-être ou le réseau est lent — réessayez maintenant.'
+            : 'Upload timed out (180s). The server may have been waking up or cellular data was slow — please try again now.'
         )
       } else {
         setUploadError(err.message || 'Failed to process document.')
