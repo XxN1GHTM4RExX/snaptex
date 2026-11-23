@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import io
 import json
 import os
@@ -40,6 +41,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 MAX_PAGES = 5
+MAX_CONCURRENT_PAGES = 2  # Keeps peak RAM well below Render's 512 MB free-tier OOM limit
 
 
 class UpdateTranscriptionRequest(BaseModel):
@@ -93,14 +95,16 @@ def pdf_bytes_to_png_pages(pdf_bytes: bytes, max_pages: int = MAX_PAGES) -> List
     page_images: List[bytes] = []
     for i in range(total_pages):
         page = pdf[i]
-        bitmap = page.render(scale=2.5)
+        bitmap = page.render(scale=2.0)
         pil_image = bitmap.to_pil()
         buf = io.BytesIO()
         pil_image.save(buf, format="PNG")
         page_images.append(buf.getvalue())
+        pil_image.close()
         page.close()
 
     pdf.close()
+    gc.collect()
     return page_images
 
 
@@ -109,12 +113,15 @@ def _process_single_page_sync(
     img_bytes: bytes,
     is_whitening_enabled: bool
 ) -> Tuple[int, float, str, str]:
-    """Runs blur detection + OCR for a single page inside a worker thread."""
-    score = calculate_blur_score(img_bytes)
-    ocr_result = process_image_with_gemini(img_bytes, aggressive_whitening=is_whitening_enabled)
-    page_latex = (ocr_result.get("latex") or "").strip()
-    page_text = (ocr_result.get("text") or "").strip()
-    return idx, score, page_latex, page_text
+    """Runs blur detection + OCR for a single page inside a worker thread and frees memory."""
+    try:
+        score = calculate_blur_score(img_bytes)
+        ocr_result = process_image_with_gemini(img_bytes, aggressive_whitening=is_whitening_enabled)
+        page_latex = (ocr_result.get("latex") or "").strip()
+        page_text = (ocr_result.get("text") or "").strip()
+        return idx, score, page_latex, page_text
+    finally:
+        gc.collect()
 
 
 def _extract_clean_json(raw_text: str) -> str:
@@ -306,13 +313,25 @@ async def process_document(
                 detail=f"You uploaded {len(page_buffers)} pages. Maximum allowed is {MAX_PAGES} pages per batch."
             )
 
-        # Process all pages concurrently across worker threads so 5 pages finish in ~1 page's time
+        # Process up to 2 pages concurrently so 5 pages finish fast without exceeding Render's 512MB RAM
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_PAGES)
+
+        async def _bounded_page_task(idx: int, img_bytes: bytes):
+            async with semaphore:
+                return await asyncio.to_thread(
+                    _process_single_page_sync, idx, img_bytes, is_whitening_enabled
+                )
+
         tasks = [
-            asyncio.to_thread(_process_single_page_sync, idx, img_bytes, is_whitening_enabled)
+            _bounded_page_task(idx, img_bytes)
             for idx, img_bytes in enumerate(page_buffers, start=1)
         ]
         page_results = await asyncio.gather(*tasks)
         page_results.sort(key=lambda item: item[0])
+
+        # Release raw image buffers before database serialization
+        page_buffers.clear()
+        gc.collect()
 
         stitched_latex_parts: List[str] = []
         stitched_text_parts: List[str] = []
@@ -320,7 +339,7 @@ async def process_document(
 
         for idx, score, page_latex, page_text in page_results:
             blur_scores.append(score)
-            if len(page_buffers) > 1:
+            if len(page_results) > 1:
                 stitched_latex_parts.append(f"## Page {idx}\n\n{page_latex}")
                 stitched_text_parts.append(f"--- Page {idx} ---\n{page_text}")
             else:
@@ -348,7 +367,7 @@ async def process_document(
         return {
             "status": "success",
             "id": saved_record.get("id"),
-            "page_count": len(page_buffers),
+            "page_count": len(page_results),
             "blur_score": avg_blur,
             "latex": final_latex,
             "text": final_text
