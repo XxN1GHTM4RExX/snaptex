@@ -671,22 +671,35 @@ def update_history_item(
     payload: UpdateTranscriptionRequest,
     authorization: str = Header(...)
 ):
-    """Persists edited markdown content and title to Supabase."""
+    """Persists edited markdown content and title to Supabase (inserts if record ID is new/missing)."""
     auth_data = verify_token(authorization)
     token = auth_data["token"]
+    user_id = auth_data["user_id"]
 
     try:
-        updated_record = update_transcription_content(
-            transcription_id=transcription_id,
-            markdown_content=payload.markdown_content,
-            filename=payload.filename,
-            access_token=token
-        )
+        updated_record = None
+        if transcription_id and transcription_id not in ("new", "null", "undefined"):
+            try:
+                updated_record = update_transcription_content(
+                    transcription_id=transcription_id,
+                    markdown_content=payload.markdown_content,
+                    filename=payload.filename,
+                    access_token=token
+                )
+            except Exception:
+                updated_record = None
+
         if not updated_record:
-            raise HTTPException(status_code=404, detail="Record not found or update failed.")
+            updated_record = save_transcription(
+                filename=payload.filename or "SnapTex_Document",
+                markdown_content=payload.markdown_content,
+                blur_score=100.0,
+                whitening_enabled=False,
+                user_id=user_id,
+                access_token=token
+            )
+
         return {"status": "success", "data": updated_record}
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
 
