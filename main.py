@@ -129,62 +129,127 @@ def _process_single_page_sync(
         gc.collect()
 
 
-def _extract_clean_json(raw_text: str) -> str:
-    """Strips markdown ```json ... ``` fences and isolates the JSON object."""
-    cleaned = raw_text.strip()
-    fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned)
-    if fence_match:
-        cleaned = fence_match.group(1).strip()
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        cleaned = cleaned[start : end + 1]
-    return cleaned
-
-
-def _normalize_katex_delimiters(text: str | None) -> str | None:
-    """Safely converts \\[...\\] and \\(...\\) to $$...$$ and $...$ without corrupting \\left( or prose."""
+def _universal_latex_markdown_sanitizer(text: str | None) -> str | None:
+    """Universally repairs LaTeX control chars, delimiters, un-delimited math lines, and Markdown tables."""
     if not text or not isinstance(text, str):
         return text
 
-    # 1. Convert standard LaTeX delimiters \[ ... \] -> $$ ... $$ and \( ... \) -> $ ... $
+    # 1. Recover LaTeX commands corrupted by ASCII control chars (\b, \f, \t, \r)
+    text = text.replace("\x08", "\\b")
+    text = text.replace("\x0c", "\\f")
+    text = re.sub(r"\x09(?=[a-zA-Z])", r"\\t", text)
+    text = re.sub(r"\x0d(?=[a-zA-Z])", r"\\r", text)
+
+    # 2. Convert [ ... ] -> $$...$$ and \(...\) -> $...$
     text = re.sub(r"\\\[\s*([\s\S]*?)\s*\\\]", r"\n$$\n\1\n$$\n", text)
     text = re.sub(r"\\\(\s*(.*?)\s*\\\)", r"$\1$", text)
 
-    # 2. Repair accidental \left$ ... \right$ or \left( ... \right$ mismatches
+    # 3. Repair accidental \left$/ \right$
     text = re.sub(r"\\left\s*\$", r"\\left(", text)
     text = re.sub(r"\\right\s*\$", r"\\right)", text)
 
-    # 3. Ensure horizontal rules and Markdown headings always start on clean lines
+    # 4. Ensure horizontal rules and Markdown headings always start on clean lines
     text = re.sub(r"([^\n])\s*---\s*(#{1,3}\s+)", r"\1\n\n---\n\n\2", text)
     text = re.sub(r"([^\n])\s+(#{1,3}\s+)", r"\1\n\n\2", text)
 
-    # 4. Repair collapsed single-line Markdown tables ("| a | b | |:---|:---| | 1 | 2 |")
+    # 5. Repair collapsed single-line Markdown tables
     text = re.sub(r"\|\s+\|(?=\s*:?-+:?\s*\|)", "|\n|", text)
     text = re.sub(r"(:?-+:?\s*\|)\s+\|", r"\1\n|", text)
     text = re.sub(r"\|\s+\|(?=\s*[^|\n]+\|)", "|\n|", text)
 
-    # 5. Ensure blank lines around Markdown table blocks so parsers render <table> cleanly
+    # 6. Auto-wrap standalone un-delimited LaTeX lines in $$...$$ and pad tables with blank lines
+    latex_cmd_pattern = re.compile(
+        r"\\(?:frac|dfrac|tfrac|sqrt|sum|prod|int|lim|begin|end|boxed|iff|implies|equiv|le|ge|neq|approx|in|notin|cup|cap|land|lor|sim|forall|exists|left|right|bigl|bigr|biggl|biggr|ln|log|sin|cos|tan|exp)\b"
+    )
+
     lines = text.splitlines()
     out_lines: List[str] = []
+    in_display_math = False
     in_table = False
-    for line in lines:
-        is_table_row = bool(re.match(r"^\s*\|.+\|\s*$", line))
+
+    for raw_line in lines:
+        stripped = raw_line.strip()
+
+        if stripped == "$$":
+            in_display_math = not in_display_math
+            out_lines.append(raw_line)
+            continue
+
+        if in_display_math:
+            out_lines.append(raw_line)
+            continue
+
+        is_table_row = bool(re.match(r"^\s*\|.+\|\s*$", raw_line))
         if is_table_row and not in_table:
             if out_lines and out_lines[-1].strip() != "":
                 out_lines.append("")
             in_table = True
         elif not is_table_row and in_table:
-            if line.strip() != "":
+            if stripped != "":
                 out_lines.append("")
             in_table = False
-        out_lines.append(line)
+
+        # If a standalone non-heading, non-list, non-table line has raw LaTeX commands and NO $ delimiters,
+        # wrap it cleanly in $$...$$ so KaTeX always renders it.
+        if (
+            stripped
+            and not is_table_row
+            and "$" not in stripped
+            and not stripped.startswith(("#", "-", "*", ">", "|"))
+            and not re.match(r"^\d+[\.\)]\s", stripped)
+            and latex_cmd_pattern.search(stripped)
+        ):
+            # Only auto-wrap as display math if it is primarily an equation/formula (not a long English sentence)
+            prose_words = re.findall(r"\b[a-zA-Z]{4,}\b", re.sub(r"\\[a-zA-Z]+", "", stripped))
+            if len(prose_words) <= 3:
+                out_lines.extend(["", "$$", stripped, "$$", ""])
+                continue
+
+        out_lines.append(raw_line)
 
     return "\n".join(out_lines)
 
 
+def _parse_tagged_copilot_output(raw_text: str) -> dict:
+    """Parses ===SECTION=== blocks from raw LLM text without JSON backslash escaping bugs."""
+    text = raw_text.strip()
+    # Strip outer ``` fences if the model wrapped the whole output
+    text = re.sub(r"^```(?:markdown|md|text)?\s*\n", "", text)
+    text = re.sub(r"\n```\s*$", "", text)
+
+    def _get_section(name: str) -> str | None:
+        pattern = rf"==={name}===\s*([\s\S]*?)(?=\n===[A-Z_]+===|\Z)"
+        m = re.search(pattern, text)
+        if not m:
+            return None
+        val = m.group(1).strip()
+        if not val or val.upper() == "NONE" or val.lower() == "null":
+            return None
+        return _universal_latex_markdown_sanitizer(val)
+
+    explanation = _get_section("EXPLANATION")
+    suggested_patch = _get_section("PATCH")
+    solution_title_raw = _get_section("SOLUTION_TITLE")
+    solution_markdown = _get_section("SOLUTION_MARKDOWN")
+
+    # Fallback if the model didn't use tags
+    if not explanation and not suggested_patch and not solution_markdown:
+        explanation = _universal_latex_markdown_sanitizer(text)
+
+    solution_title = None
+    if solution_title_raw:
+        solution_title = solution_title_raw.splitlines()[0].strip().strip("#").strip()
+
+    return {
+        "explanation": explanation or "",
+        "suggested_patch": suggested_patch,
+        "solution_title": solution_title,
+        "solution_markdown": solution_markdown,
+    }
+
+
 def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> str:
-    """Uses provider_manager key pools: Gemini 2.5 -> Groq -> OpenRouter with strict JSON output."""
+    """Uses provider_manager key pools: Gemini 2.5 -> Groq -> OpenRouter with raw text output."""
     provider_manager.reload_all()
     errors = []
 
@@ -203,11 +268,10 @@ def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> s
                         contents=context_prompt,
                         config={
                             "system_instruction": system_instruction,
-                            "response_mime_type": "application/json",
                         },
                     )
                     if response.text:
-                        return _extract_clean_json(response.text)
+                        return response.text
                 except APIError as e:
                     errors.append(f"Google({model_name}): {e.code}")
                     if e.code == 429 or "quota" in str(e).lower():
@@ -227,12 +291,11 @@ def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> s
                     {"role": "system", "content": system_instruction},
                     {"role": "user", "content": context_prompt},
                 ],
-                "response_format": {"type": "json_object"},
                 "temperature": 0.2,
             }).encode("utf-8")
 
             req = urllib.request.Request(
-                "https://api.groq.com/openai/v1/chat/completions",
+                "[https://api.groq.com/openai/v1/chat/completions](https://api.groq.com/openai/v1/chat/completions)",
                 data=req_body,
                 headers={
                     "Authorization": f"Bearer {groq_key}",
@@ -243,7 +306,7 @@ def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> s
             )
             with urllib.request.urlopen(req, timeout=45) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-                return _extract_clean_json(data["choices"][0]["message"]["content"])
+                return data["choices"][0]["message"]["content"]
         except Exception as e:
             if "429" in str(e):
                 provider_manager.groq_pool.mark_rate_limited(groq_key, cooldown_seconds=60)
@@ -260,25 +323,24 @@ def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> s
                     {"role": "system", "content": system_instruction},
                     {"role": "user", "content": context_prompt},
                 ],
-                "response_format": {"type": "json_object"},
                 "temperature": 0.2,
             }).encode("utf-8")
 
             req = urllib.request.Request(
-                "https://openrouter.ai/api/v1/chat/completions",
+                "[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)",
                 data=req_body,
                 headers={
                     "Authorization": f"Bearer {or_key}",
                     "Content-Type": "application/json",
                     "User-Agent": "SnapTex-Backend/2.0",
-                    "HTTP-Referer": "https://snaptex-omega.vercel.app",
+                    "HTTP-Referer": "[https://snaptex-omega.vercel.app](https://snaptex-omega.vercel.app)",
                     "X-Title": "SnapTex AI Copilot",
                 },
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=60) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-                return _extract_clean_json(data["choices"][0]["message"]["content"])
+                return data["choices"][0]["message"]["content"]
         except Exception as e:
             if "429" in str(e):
                 provider_manager.openrouter_pool.mark_rate_limited(or_key, cooldown_seconds=60)
@@ -354,11 +416,12 @@ async def process_document(
 
         for idx, score, page_latex, page_text in page_results:
             blur_scores.append(score)
+            clean_page_latex = _universal_latex_markdown_sanitizer(page_latex) or ""
             if len(page_results) > 1:
-                stitched_latex_parts.append(f"## Page {idx}\n\n{page_latex}")
+                stitched_latex_parts.append(f"## Page {idx}\n\n{clean_page_latex}")
                 stitched_text_parts.append(f"--- Page {idx} ---\n{page_text}")
             else:
-                stitched_latex_parts.append(page_latex)
+                stitched_latex_parts.append(clean_page_latex)
                 stitched_text_parts.append(page_text)
 
         final_latex = "\n\n---\n\n".join(stitched_latex_parts)
@@ -409,18 +472,21 @@ async def ai_assist(
             "You are SnapTex Copilot, an expert university-level STEM assistant. "
             "You help students audit math/physics proofs, fix OCR LaTeX errors, generate practice exercises, "
             "and produce complete step-by-step solution documents. "
-            f"IMPORTANT: Write ALL natural-language explanations, headings, solution titles, and worked solutions strictly in {lang_label}. "
-            "CRITICAL MATH & MARKDOWN FORMATTING RULES:\n"
-            "1. Wrap EVERY math expression in single dollar signs ($...$) for inline math or double dollar signs ($$...$$) on their own lines for display math. NEVER leave raw LaTeX commands like \\frac, \\sum, \\prod, \\land, \\lor, \\sim, \\equiv, or \\infty outside $...$ delimiters.\n"
-            "2. NEVER nest $ signs inside $...$ or use \\left$ / \\right$.\n"
+            f"IMPORTANT: Write ALL natural-language explanations, headings, solution titles, and worked solutions strictly in {lang_label}.\n"
+            "CRITICAL KATEX & MARKDOWN RULES:\n"
+            "1. Wrap EVERY inline math expression in single dollar signs ($...$) and EVERY standalone display equation on its own lines with $$ on the line before and $$ on the line after.\n"
+            "2. NEVER leave raw LaTeX commands (\\frac, \\ln, \\bigl, \\begin{cases}, \\boxed, \\iff, \\infty, etc.) outside $...$ or $$...$$.\n"
             "3. Keep ALL natural-language prose strictly OUTSIDE $...$ delimiters so words are never italicized or merged together.\n"
-            "4. Format Markdown tables with a blank line before and after, and put each row on its own newline (e.g., '| $p$ | $q$ |\\n|---|---|\\n| T | T |').\n"
-            "You MUST return strictly valid JSON with exact keys: "
-            "'explanation' (concise summary or explanation in Markdown with $...$ / $$...$$ KaTeX math), "
-            "'suggested_patch' (corrected markdown snippet when editing a tagged line, or null), "
-            f"'solution_title' (if mode is 'solution', a clean title like '{title_example}', else null), and "
-            "'solution_markdown' (if mode is 'solution', the complete, rigorous step-by-step worked solution "
-            "formatted in Markdown with $...$ and $$...$$ KaTeX math, proper multi-line Markdown tables, and '\\n\\n---\\n\\n' between sections, else null)."
+            "4. Format Markdown tables with a blank line before and after, and put every row on its own newline.\n"
+            "5. Output your response using EXACTLY these four section markers (do NOT wrap in JSON):\n\n"
+            "===EXPLANATION===\n"
+            "<concise summary or explanation in Markdown with $...$ and $$...$$ KaTeX math>\n\n"
+            "===PATCH===\n"
+            "<corrected markdown snippet when fixing a tagged line, or NONE>\n\n"
+            "===SOLUTION_TITLE===\n"
+            f"<if mode is 'solution', a clean title like '{title_example}', else NONE>\n\n"
+            "===SOLUTION_MARKDOWN===\n"
+            "<if mode is 'solution', the complete step-by-step worked solution in Markdown with $...$ and $$...$$ KaTeX math, multi-line Markdown tables, and '\\n\\n---\\n\\n' between sections, else NONE>"
         )
 
         context_prompt = (
@@ -432,11 +498,8 @@ async def ai_assist(
             f"User Request: {payload.user_prompt}"
         )
 
-        raw_result_json = run_copilot_with_fallback(system_instruction, context_prompt)
-        parsed = json.loads(raw_result_json)
-        for field in ("explanation", "suggested_patch", "solution_markdown"):
-            if field in parsed and parsed[field]:
-                parsed[field] = _normalize_katex_delimiters(parsed[field])
+        raw_output = run_copilot_with_fallback(system_instruction, context_prompt)
+        parsed = _parse_tagged_copilot_output(raw_output)
 
         return {"status": "success", "result": json.dumps(parsed, ensure_ascii=False)}
     except Exception as e:

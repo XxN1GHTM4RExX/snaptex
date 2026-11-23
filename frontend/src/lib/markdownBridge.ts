@@ -16,11 +16,11 @@ function unescapeHtmlAttr(str: string): string {
     .replace(/&amp;/g, '&')
 }
 
-/**
- * Strips any stray $ or \( \) delimiters accidentally nested inside an already-delimited math expression.
- */
 function sanitizeInnerMath(tex: string): string {
   return tex
+    .replace(/\x08/g, '\\b')
+    .replace(/\x0c/g, '\\f')
+    .replace(/\x09(?=[a-zA-Z])/g, '\\t')
     .replace(/\\\(/g, '(')
     .replace(/\\\)/g, ')')
     .replace(/\\\[/g, '[')
@@ -30,43 +30,87 @@ function sanitizeInnerMath(tex: string): string {
 }
 
 /**
- * Converts backend Markdown (containing LaTeX math, Markdown tables, and Base64 images)
- * into clean HTML that TipTap v3 (@tiptap/extension-mathematics) parses into live KaTeX nodes.
+ * Universally cleans raw Markdown + LaTeX before parsing so un-delimited equation lines,
+ * JSON control-char corruptions, and collapsed tables always render cleanly.
  */
+function preprocessMarkdownForTipTap(markdown: string): string {
+  let text = markdown
+    .replace(/\x08/g, '\\b')
+    .replace(/\x0c/g, '\\f')
+    .replace(/\x09(?=[a-zA-Z])/g, '\\t')
+    .replace(/\\\[\s*([\s\S]*?)\s*\\\]/g, '\n$$\n$1\n$$\n')
+    .replace(/\\\(\s*(.*?)\s*\\\)/g, '$$$1$$')
+    .replace(/\\left\s*\$/g, '\\left(')
+    .replace(/\\right\s*\$/g, '\\right)')
+
+  const latexCmdRegex =
+    /\\(?:frac|dfrac|tfrac|sqrt|sum|prod|int|lim|begin|end|boxed|iff|implies|equiv|le|ge|neq|approx|in|notin|cup|cap|land|lor|sim|forall|exists|left|right|bigl|bigr|biggl|biggr|ln|log|sin|cos|tan|exp)\b/
+
+  const lines = text.split('\n')
+  const out: string[] = []
+  let inDisplayMath = false
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (trimmed === '$$') {
+      inDisplayMath = !inDisplayMath
+      out.push(line)
+      continue
+    }
+    if (inDisplayMath) {
+      out.push(line)
+      continue
+    }
+
+    if (
+      trimmed &&
+      !trimmed.includes('$') &&
+      !trimmed.startsWith('#') &&
+      !trimmed.startsWith('-') &&
+      !trimmed.startsWith('*') &&
+      !trimmed.startsWith('>') &&
+      !trimmed.startsWith('|') &&
+      !/^\d+[\.\)]\s/.test(trimmed) &&
+      latexCmdRegex.test(trimmed)
+    ) {
+      const strippedCmds = trimmed.replace(/\\[a-zA-Z]+/g, '')
+      const proseWords = strippedCmds.match(/\b[a-zA-Z]{4,}\b/g) || []
+      if (proseWords.length <= 3) {
+        out.push('', '$$', trimmed, '$$', '')
+        continue
+      }
+    }
+
+    out.push(line)
+  }
+
+  return out.join('\n')
+}
+
 export function markdownToHtml(markdown: string): string {
   if (!markdown) return '<p></p>'
 
   const mathBlocks: string[] = []
   const inlineMaths: string[] = []
 
+  const preprocessed = preprocessMarkdownForTipTap(markdown)
+
   // 1. Protect block math $$...$$ BEFORE marked.parse() touches underscores/backslashes
-  let protectedMd = markdown.replace(/\$\$([\s\S]*?)\$\$/g, (_, math) => {
+  let protectedMd = preprocessed.replace(/\$\$([\s\S]*?)\$\$/g, (_, math) => {
     const idx = mathBlocks.push(sanitizeInnerMath(math)) - 1
     return `\n\n@@BLOCK_MATH_${idx}@@\n\n`
   })
 
-  // 2. Also convert standalone \[ ... \] blocks into block math
-  protectedMd = protectedMd.replace(/\\\[([\s\S]*?)\\\]/g, (_, math) => {
-    const idx = mathBlocks.push(sanitizeInnerMath(math)) - 1
-    return `\n\n@@BLOCK_MATH_${idx}@@\n\n`
-  })
-
-  // 3. Protect inline math $...$
+  // 2. Protect inline math $...$
   protectedMd = protectedMd.replace(/\$([^\$\n]+?)\$/g, (_, math) => {
     const idx = inlineMaths.push(sanitizeInnerMath(math)) - 1
     return `@@INLINE_MATH_${idx}@@`
   })
 
-  // 4. Convert remaining standalone \( ... \) into inline math
-  protectedMd = protectedMd.replace(/\\\(([^\n]+?)\\\)/g, (_, math) => {
-    const idx = inlineMaths.push(sanitizeInnerMath(math)) - 1
-    return `@@INLINE_MATH_${idx}@@`
-  })
-
-  // 5. Parse remaining Markdown (headings, lists, tables, bold, italic, images)
+  // 3. Parse remaining Markdown (headings, lists, tables, bold, italic, images)
   let html = marked.parse(protectedMd, { async: false, gfm: true, breaks: false }) as string
 
-  // 6. Restore TipTap v3 block-math and inline-math nodes
+  // 4. Restore TipTap v3 block-math and inline-math nodes
   html = html.replace(/<p>\s*@@BLOCK_MATH_(\d+)@@\s*<\/p>/g, (_, idx) => {
     const latex = escapeHtmlAttr(mathBlocks[Number(idx)] || '')
     return `<div data-type="block-math" data-latex="${latex}"></div>`
@@ -85,20 +129,15 @@ export function markdownToHtml(markdown: string): string {
   return html
 }
 
-/**
- * Extracts raw Markdown + LaTeX (including GFM tables) back out from TipTap HTML for saving or exporting.
- */
 export function htmlToMarkdown(html: string): string {
   if (!html) return ''
 
   let md = html
-    // Serialize TipTap v3 block-math & inline-math nodes back to $$...$$ and $...$
     .replace(/<div[^>]*data-type="block-math"[^>]*data-latex="([^"]*)"[^>]*><\/div>/g, (_, latex) => `\n$$\n${unescapeHtmlAttr(latex)}\n$$\n`)
     .replace(/<div[^>]*data-latex="([^"]*)"[^>]*data-type="block-math"[^>]*><\/div>/g, (_, latex) => `\n$$\n${unescapeHtmlAttr(latex)}\n$$\n`)
     .replace(/<span[^>]*data-type="inline-math"[^>]*data-latex="([^"]*)"[^>]*><\/span>/g, (_, latex) => `$${unescapeHtmlAttr(latex)}$`)
     .replace(/<span[^>]*data-latex="([^"]*)"[^>]*data-type="inline-math"[^>]*><\/span>/g, (_, latex) => `$${unescapeHtmlAttr(latex)}$`)
 
-  // Convert HTML <table> elements back into Markdown GFM tables so tables survive Save/Reload
   md = md.replace(/<table[^>]*>([\s\S]*?)<\/table>/gi, (_, tableInner) => {
     const rows: string[][] = []
     const rowMatches = tableInner.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || []
