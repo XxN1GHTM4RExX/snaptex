@@ -45,9 +45,46 @@ interface TaggedSpot {
   previewText: string
 }
 
+function normalizeAiMarkdown(md: string): string {
+  if (!md) return ''
+  let out = md
+    .replace(/\\\[\s*([\s\S]*?)\s*\\\]/g, '\n$$\n$1\n$$\n')
+    .replace(/\\\(\s*(.*?)\s*\\\)/g, '$$$1$$')
+    .replace(/\\left\s*\$/g, '\\left(')
+    .replace(/\\right\s*\$/g, '\\right)')
+    .replace(/([^\n])\s*---\s*(#{1,3}\s+)/g, '$1\n\n---\n\n$2')
+    .replace(/([^\n])\s+(#{1,3}\s+)/g, '$1\n\n$2')
+    // Split collapsed single-line Markdown table rows onto separate lines
+    .replace(/\|\s+\|(?=\s*:?-+:?\s*\|)/g, '|\n|')
+    .replace(/(:?-+:?\s*\|)\s+\|/g, '$1\n|')
+    .replace(/\|\s+\|(?=\s*[^|\n]+\|)/g, '|\n|')
+
+  // Ensure blank lines around Markdown tables so markdownToHtml parses them into <table>
+  const lines = out.split('\n')
+  const fixed: string[] = []
+  let inTable = false
+  for (const line of lines) {
+    const isTableRow = /^\s*\|.+\|\s*$/.test(line)
+    if (isTableRow && !inTable) {
+      if (fixed.length > 0 && fixed[fixed.length - 1].trim() !== '') {
+        fixed.push('')
+      }
+      inTable = true
+    } else if (!isTableRow && inTable) {
+      if (line.trim() !== '') {
+        fixed.push('')
+      }
+      inTable = false
+    }
+    fixed.push(line)
+  }
+  return fixed.join('\n')
+}
+
 function renderStudentFriendlyHtml(md: string): string {
   if (!md) return ''
-  let withMath = md.replace(/\$\$([\s\S]+?)\$\$/g, (_, tex) => {
+  const cleaned = normalizeAiMarkdown(md)
+  let withMath = cleaned.replace(/\$\$([\s\S]+?)\$\$/g, (_, tex) => {
     try {
       return katex.renderToString(tex.trim(), { throwOnError: false, displayMode: true })
     } catch {
@@ -98,9 +135,11 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
 
   const API_URL = import.meta.env.VITE_API_URL || 'https://snaptex.onrender.com'
 
+  const normalizedInitial = useMemo(() => normalizeAiMarkdown(initialContent), [initialContent])
+
   const pages = useMemo(() => {
-    return initialContent.split(/\n\s*---\s*\n/).map(p => p.trim()).filter(Boolean)
-  }, [initialContent])
+    return normalizedInitial.split(/\n\s*---\s*\n/).map(p => p.trim()).filter(Boolean)
+  }, [normalizedInitial])
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -162,7 +201,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
       TableCell,
       Image.configure({ inline: false, allowBase64: true }),
     ],
-    content: markdownToHtml(isBookView && pages.length > 0 ? pages[currentPageIndex] : initialContent),
+    content: markdownToHtml(isBookView && pages.length > 0 ? pages[currentPageIndex] : normalizedInitial),
     onSelectionUpdate: () => forceToolbarUpdate(n => n + 1),
     onTransaction: () => forceToolbarUpdate(n => n + 1),
     editorProps: {
@@ -174,13 +213,13 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
 
   useEffect(() => {
     if (!editor) return
-    const contentToLoad = isBookView && pages.length > 0 ? pages[currentPageIndex] : initialContent
+    const contentToLoad = isBookView && pages.length > 0 ? pages[currentPageIndex] : normalizedInitial
     const newHtml = markdownToHtml(contentToLoad)
     if (editor.getHTML() !== newHtml) {
       editor.commands.setContent(newHtml)
       setTaggedSpot(null)
     }
-  }, [currentPageIndex, isBookView, pages, initialContent, editor])
+  }, [currentPageIndex, isBookView, pages, normalizedInitial, editor])
 
   if (!editor) {
     return <div className="p-8 text-zinc-400">Loading editor...</div>
@@ -348,7 +387,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
 
   const handleApplySurgicalPatch = () => {
     if (!copilotResponse || typeof copilotResponse === 'string' || !copilotResponse.suggested_patch) return
-    const patchHtml = markdownToHtml(copilotResponse.suggested_patch)
+    const patchHtml = markdownToHtml(normalizeAiMarkdown(copilotResponse.suggested_patch))
 
     if (taggedSpot) {
       editor
@@ -370,11 +409,12 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
     if (!copilotResponse || typeof copilotResponse !== 'object' || !copilotResponse.solution_markdown) return
     const defaultPrefix = lang === 'fr' ? 'Corrigé' : 'Solution'
     const solTitle = copilotResponse.solution_title || `${defaultPrefix} — ${title}`
+    const cleanSolutionMd = normalizeAiMarkdown(copilotResponse.solution_markdown)
     if (onOpenGeneratedDoc) {
-      onOpenGeneratedDoc(solTitle, copilotResponse.solution_markdown)
+      onOpenGeneratedDoc(solTitle, cleanSolutionMd)
     } else {
       onTitleChange(solTitle)
-      editor.commands.setContent(markdownToHtml(copilotResponse.solution_markdown))
+      editor.commands.setContent(markdownToHtml(cleanSolutionMd))
     }
 
     if (typeof window !== 'undefined' && window.innerWidth < 768) {
@@ -392,7 +432,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
     editor
       .chain()
       .focus()
-      .insertContentAt(insertPos, `\n\n> **${notePrefix}:** ${explanationText}\n\n`)
+      .insertContentAt(insertPos, `\n\n> **${notePrefix}:** ${normalizeAiMarkdown(explanationText)}\n\n`)
       .run()
 
     if (typeof window !== 'undefined' && window.innerWidth < 768) {
@@ -419,7 +459,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
           .snaptex-prose em, .snaptex-prose i { font-style: italic !important; color: #fafafa; }
           .snaptex-prose ul { list-style-type: disc; padding-left: 1.5rem; margin: 0.5rem 0; }
           .snaptex-prose ol { list-style-type: decimal; padding-left: 1.5rem; margin: 0.5rem 0; }
-          .snaptex-prose table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+          .snaptex-prose table { border-collapse: collapse; width: 100%; margin: 1rem 0; display: block; overflow-x: auto; }
           .snaptex-prose th, .snaptex-prose td { border: 1px solid #3f3f46; padding: 0.5rem 0.75rem; text-align: left; }
           .snaptex-prose th { background-color: #27272a; font-weight: 600; color: #fff; }
 
@@ -704,7 +744,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
         </div>
       </div>
 
-      {/* Responsive AI Copilot Drawer (Full-Screen on Mobile, Side Panel on Desktop) */}
+      {/* Responsive AI Copilot Drawer */}
       {isCopilotOpen && (
         <aside className="fixed inset-0 z-50 w-full md:static md:w-96 md:z-20 bg-[#222222] md:border-l border-zinc-800 flex flex-col justify-between shadow-2xl shrink-0 print:hidden">
           <div>

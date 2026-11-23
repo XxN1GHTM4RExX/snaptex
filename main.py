@@ -41,12 +41,17 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 MAX_PAGES = 5
-MAX_CONCURRENT_PAGES = 2  # Keeps peak RAM well below Render's 512 MB free-tier OOM limit
+MAX_CONCURRENT_PAGES = 2
 
 
 class UpdateTranscriptionRequest(BaseModel):
     markdown_content: str
     filename: str | None = None
+
+
+class CreateTranscriptionRequest(BaseModel):
+    markdown_content: str
+    filename: str = "SnapTex_Document"
 
 
 class ExportDocumentRequest(BaseModel):
@@ -138,32 +143,44 @@ def _extract_clean_json(raw_text: str) -> str:
 
 
 def _normalize_katex_delimiters(text: str | None) -> str | None:
-    """Converts \\[...\\], \\(...\\), and JSON-stripped [...] / (...) math blocks into $$...$$ and $...$."""
+    """Safely converts \\[...\\] and \\(...\\) to $$...$$ and $...$ without corrupting \\left( or prose."""
     if not text or not isinstance(text, str):
         return text
 
-    # 1. Standard \[ ... \] -> $$ ... $$ and \( ... \) -> $ ... $
-    text = re.sub(r"\\\[\s*([\s\S]*?)\s*\\\]", r"$$\n\1\n$$", text)
+    # 1. Convert standard LaTeX delimiters \[ ... \] -> $$ ... $$ and \( ... \) -> $ ... $
+    text = re.sub(r"\\\[\s*([\s\S]*?)\s*\\\]", r"\n$$\n\1\n$$\n", text)
     text = re.sub(r"\\\(\s*(.*?)\s*\\\)", r"$\1$", text)
 
-    # 2. Catch JSON-unescaped standalone display lines: [ ... ] containing LaTeX/math symbols
-    def _replace_display_bracket(match: re.Match) -> str:
-        inner = match.group(1).strip()
-        if any(tok in inner for tok in ("\\", "^", "_", "=", "+", "-")):
-            return f"$$\n{inner}\n$$"
-        return match.group(0)
+    # 2. Repair accidental \left$ ... \right$ or \left( ... \right$ mismatches
+    text = re.sub(r"\\left\s*\$", r"\\left(", text)
+    text = re.sub(r"\\right\s*\$", r"\\right)", text)
 
-    text = re.sub(r"(?m)^\s*\[\s*([^\[\]\n]+?)\s*\]\s*$", _replace_display_bracket, text)
+    # 3. Ensure horizontal rules and Markdown headings always start on clean lines
+    text = re.sub(r"([^\n])\s*---\s*(#{1,3}\s+)", r"\1\n\n---\n\n\2", text)
+    text = re.sub(r"([^\n])\s+(#{1,3}\s+)", r"\1\n\n\2", text)
 
-    # 3. Catch JSON-unescaped inline math: ( ... ) containing backslashes, powers, or equations
-    def _replace_inline_paren(match: re.Match) -> str:
-        inner = match.group(1).strip()
-        if "\\" in inner or "^" in inner or "_" in inner or re.search(r"[a-zA-Z0-9']\s*=\s*[a-zA-Z0-9\\-]", inner):
-            return f"${inner}$"
-        return match.group(0)
+    # 4. Repair collapsed single-line Markdown tables ("| a | b | |:---|:---| | 1 | 2 |")
+    text = re.sub(r"\|\s+\|(?=\s*:?-+:?\s*\|)", "|\n|", text)
+    text = re.sub(r"(:?-+:?\s*\|)\s+\|", r"\1\n|", text)
+    text = re.sub(r"\|\s+\|(?=\s*[^|\n]+\|)", "|\n|", text)
 
-    text = re.sub(r"(?<!\\)\(\s*([^()\n]+?)\s*\)", _replace_inline_paren, text)
-    return text
+    # 5. Ensure blank lines around Markdown table blocks so parsers render <table> cleanly
+    lines = text.splitlines()
+    out_lines: List[str] = []
+    in_table = False
+    for line in lines:
+        is_table_row = bool(re.match(r"^\s*\|.+\|\s*$", line))
+        if is_table_row and not in_table:
+            if out_lines and out_lines[-1].strip() != "":
+                out_lines.append("")
+            in_table = True
+        elif not is_table_row and in_table:
+            if line.strip() != "":
+                out_lines.append("")
+            in_table = False
+        out_lines.append(line)
+
+    return "\n".join(out_lines)
 
 
 def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> str:
@@ -313,7 +330,6 @@ async def process_document(
                 detail=f"You uploaded {len(page_buffers)} pages. Maximum allowed is {MAX_PAGES} pages per batch."
             )
 
-        # Process up to 2 pages concurrently so 5 pages finish fast without exceeding Render's 512MB RAM
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_PAGES)
 
         async def _bounded_page_task(idx: int, img_bytes: bytes):
@@ -329,7 +345,6 @@ async def process_document(
         page_results = await asyncio.gather(*tasks)
         page_results.sort(key=lambda item: item[0])
 
-        # Release raw image buffers before database serialization
         page_buffers.clear()
         gc.collect()
 
@@ -395,14 +410,17 @@ async def ai_assist(
             "You help students audit math/physics proofs, fix OCR LaTeX errors, generate practice exercises, "
             "and produce complete step-by-step solution documents. "
             f"IMPORTANT: Write ALL natural-language explanations, headings, solution titles, and worked solutions strictly in {lang_label}. "
-            "CRITICAL MATH FORMATTING RULE: Use ONLY single dollar signs ($...$) for inline math and double dollar signs ($$...$$) on separate lines for display block math. "
-            "NEVER use \\(...\\) or \\[...\\] delimiters anywhere. "
+            "CRITICAL MATH & MARKDOWN FORMATTING RULES:\n"
+            "1. Wrap EVERY math expression in single dollar signs ($...$) for inline math or double dollar signs ($$...$$) on their own lines for display math. NEVER leave raw LaTeX commands like \\frac, \\sum, \\prod, \\land, \\lor, \\sim, \\equiv, or \\infty outside $...$ delimiters.\n"
+            "2. NEVER nest $ signs inside $...$ or use \\left$ / \\right$.\n"
+            "3. Keep ALL natural-language prose strictly OUTSIDE $...$ delimiters so words are never italicized or merged together.\n"
+            "4. Format Markdown tables with a blank line before and after, and put each row on its own newline (e.g., '| $p$ | $q$ |\\n|---|---|\\n| T | T |').\n"
             "You MUST return strictly valid JSON with exact keys: "
             "'explanation' (concise summary or explanation in Markdown with $...$ / $$...$$ KaTeX math), "
             "'suggested_patch' (corrected markdown snippet when editing a tagged line, or null), "
             f"'solution_title' (if mode is 'solution', a clean title like '{title_example}', else null), and "
             "'solution_markdown' (if mode is 'solution', the complete, rigorous step-by-step worked solution "
-            "formatted in Markdown with $...$ and $$...$$ KaTeX math and '---' between pages/sections, else null)."
+            "formatted in Markdown with $...$ and $$...$$ KaTeX math, proper multi-line Markdown tables, and '\\n\\n---\\n\\n' between sections, else null)."
         )
 
         context_prompt = (
@@ -563,6 +581,30 @@ def get_history(authorization: str = Header(...)):
     auth_data = verify_token(authorization)
     token = auth_data["token"]
     return {"history": fetch_recent_transcriptions(access_token=token, limit=10)}
+
+
+@app.post("/history")
+def create_history_item(
+    payload: CreateTranscriptionRequest,
+    authorization: str = Header(...)
+):
+    """Saves a newly generated document (such as an AI Solution File) to Supabase history."""
+    auth_data = verify_token(authorization)
+    token = auth_data["token"]
+    user_id = auth_data["user_id"]
+
+    try:
+        saved_record = save_transcription(
+            filename=payload.filename,
+            markdown_content=payload.markdown_content,
+            blur_score=100.0,
+            whitening_enabled=False,
+            user_id=user_id,
+            access_token=token
+        )
+        return {"status": "success", "data": saved_record}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Create history item failed: {str(e)}")
 
 
 @app.put("/history/{transcription_id}")
