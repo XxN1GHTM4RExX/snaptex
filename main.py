@@ -140,24 +140,24 @@ def _universal_latex_markdown_sanitizer(text: str | None) -> str | None:
     text = re.sub(r"\x09(?=[a-zA-Z])", r"\\t", text)
     text = re.sub(r"\x0d(?=[a-zA-Z])", r"\\r", text)
 
-    # 2. Convert [ ... ] -> $$...$$ and \(...\) -> $...$
+    # 2. Convert \[ ... \] -> $$ ... $$ and \( ... \) -> $ ... $
     text = re.sub(r"\\\[\s*([\s\S]*?)\s*\\\]", r"\n$$\n\1\n$$\n", text)
     text = re.sub(r"\\\(\s*(.*?)\s*\\\)", r"$\1$", text)
 
-    # 3. Repair accidental \left$/ \right$
+    # 3. Repair accidental \left$ / \right$
     text = re.sub(r"\\left\s*\$", r"\\left(", text)
     text = re.sub(r"\\right\s*\$", r"\\right)", text)
 
     # 4. Ensure horizontal rules and Markdown headings always start on clean lines
-    text = re.sub(r"([^\n])\s*---\s*(#{1,3}\s+)", r"\1\n\n---\n\n\2", text)
-    text = re.sub(r"([^\n])\s+(#{1,3}\s+)", r"\1\n\n\2", text)
+    text = re.sub(r"([^\n])\s*---\s*(#{1,4}\s+)", r"\1\n\n---\n\n\2", text)
+    text = re.sub(r"([^\n])\s+(#{1,4}\s+)", r"\1\n\n\2", text)
 
     # 5. Repair collapsed single-line Markdown tables
     text = re.sub(r"\|\s+\|(?=\s*:?-+:?\s*\|)", "|\n|", text)
     text = re.sub(r"(:?-+:?\s*\|)\s+\|", r"\1\n|", text)
     text = re.sub(r"\|\s+\|(?=\s*[^|\n]+\|)", "|\n|", text)
 
-    # 6. Auto-wrap standalone un-delimited LaTeX lines in $$...$$ and pad tables with blank lines
+    # 6. Auto-wrap standalone un-delimited LaTeX lines in $$ ... $$ and pad tables with blank lines
     latex_cmd_pattern = re.compile(
         r"\\(?:frac|dfrac|tfrac|sqrt|sum|prod|int|lim|begin|end|boxed|iff|implies|equiv|le|ge|neq|approx|in|notin|cup|cap|land|lor|sim|forall|exists|left|right|bigl|bigr|biggl|biggr|ln|log|sin|cos|tan|exp)\b"
     )
@@ -189,8 +189,6 @@ def _universal_latex_markdown_sanitizer(text: str | None) -> str | None:
                 out_lines.append("")
             in_table = False
 
-        # If a standalone non-heading, non-list, non-table line has raw LaTeX commands and NO $ delimiters,
-        # wrap it cleanly in $$...$$ so KaTeX always renders it.
         if (
             stripped
             and not is_table_row
@@ -199,7 +197,6 @@ def _universal_latex_markdown_sanitizer(text: str | None) -> str | None:
             and not re.match(r"^\d+[\.\)]\s", stripped)
             and latex_cmd_pattern.search(stripped)
         ):
-            # Only auto-wrap as display math if it is primarily an equation/formula (not a long English sentence)
             prose_words = re.findall(r"\b[a-zA-Z]{4,}\b", re.sub(r"\\[a-zA-Z]+", "", stripped))
             if len(prose_words) <= 3:
                 out_lines.extend(["", "$$", stripped, "$$", ""])
@@ -213,7 +210,6 @@ def _universal_latex_markdown_sanitizer(text: str | None) -> str | None:
 def _parse_tagged_copilot_output(raw_text: str) -> dict:
     """Parses ===SECTION=== blocks from raw LLM text without JSON backslash escaping bugs."""
     text = raw_text.strip()
-    # Strip outer ``` fences if the model wrapped the whole output
     text = re.sub(r"^```(?:markdown|md|text)?\s*\n", "", text)
     text = re.sub(r"\n```\s*$", "", text)
 
@@ -232,7 +228,6 @@ def _parse_tagged_copilot_output(raw_text: str) -> dict:
     solution_title_raw = _get_section("SOLUTION_TITLE")
     solution_markdown = _get_section("SOLUTION_MARKDOWN")
 
-    # Fallback if the model didn't use tags
     if not explanation and not suggested_patch and not solution_markdown:
         explanation = _universal_latex_markdown_sanitizer(text)
 
@@ -249,7 +244,7 @@ def _parse_tagged_copilot_output(raw_text: str) -> dict:
 
 
 def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> str:
-    """Uses provider_manager key pools: Gemini 2.5 -> Groq -> OpenRouter with raw text output."""
+    """Uses provider_manager key pools: Gemini -> Groq -> OpenRouter with raw text output."""
     provider_manager.reload_all()
     errors = []
 
@@ -261,7 +256,7 @@ def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> s
             from google import genai
             from google.genai.errors import APIError
             client = genai.Client(api_key=g_key, http_options={"timeout": 60000})
-            for model_name in ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"]:
+            for model_name in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest", "gemini-2.5-pro"]:
                 try:
                     response = client.models.generate_content(
                         model=model_name,
@@ -295,7 +290,7 @@ def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> s
             }).encode("utf-8")
 
             req = urllib.request.Request(
-                "[https://api.groq.com/openai/v1/chat/completions](https://api.groq.com/openai/v1/chat/completions)",
+                "https://api.groq.com/openai/v1/chat/completions",
                 data=req_body,
                 headers={
                     "Authorization": f"Bearer {groq_key}",
@@ -327,13 +322,13 @@ def run_copilot_with_fallback(system_instruction: str, context_prompt: str) -> s
             }).encode("utf-8")
 
             req = urllib.request.Request(
-                "[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)",
+                "https://openrouter.ai/api/v1/chat/completions",
                 data=req_body,
                 headers={
                     "Authorization": f"Bearer {or_key}",
                     "Content-Type": "application/json",
                     "User-Agent": "SnapTex-Backend/2.0",
-                    "HTTP-Referer": "[https://snaptex-omega.vercel.app](https://snaptex-omega.vercel.app)",
+                    "HTTP-Referer": "https://snaptex-omega.vercel.app",
                     "X-Title": "SnapTex AI Copilot",
                 },
                 method="POST",
@@ -461,7 +456,7 @@ async def ai_assist(
     payload: AIAssistRequest,
     authorization: str = Header(...)
 ):
-    """Surgical AI Copilot endpoint backed by pooled Gemini 2.5 -> Groq -> OpenRouter."""
+    """Surgical AI Copilot endpoint backed by pooled Gemini -> Groq -> OpenRouter."""
     verify_token(authorization)
 
     try:
