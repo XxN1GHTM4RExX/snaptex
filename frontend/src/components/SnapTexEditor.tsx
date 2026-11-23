@@ -47,13 +47,14 @@ interface TaggedSpot {
 
 function normalizeAiMarkdown(md: string): string {
   if (!md) return ''
-  let out = md
-    .replace(/\\\[\s*([\s\S]*?)\s*\\\]/g, '\n$$\n$1\n$$\n')
-    .replace(/\\\(\s*(.*?)\s*\\\)/g, '$$$1$$')
+  const out = md
+    .replace(/\x08/g, '\\b')
+    .replace(/\x0c/g, '\\f')
+    .replace(/\x09(?=[a-zA-Z])/g, '\\t')
     .replace(/\\left\s*\$/g, '\\left(')
     .replace(/\\right\s*\$/g, '\\right)')
-    .replace(/([^\n])\s*---\s*(#{1,3}\s+)/g, '$1\n\n---\n\n$2')
-    .replace(/([^\n])\s+(#{1,3}\s+)/g, '$1\n\n$2')
+    .replace(/([^\n])\s*---\s*(#{1,4}\s+)/g, '$1\n\n---\n\n$2')
+    .replace(/([^\n])\s+(#{1,4}\s+)/g, '$1\n\n$2')
     // Split collapsed single-line Markdown table rows onto separate lines
     .replace(/\|\s+\|(?=\s*:?-+:?\s*\|)/g, '|\n|')
     .replace(/(:?-+:?\s*\|)\s+\|/g, '$1\n|')
@@ -84,6 +85,9 @@ function normalizeAiMarkdown(md: string): string {
 function renderStudentFriendlyHtml(md: string): string {
   if (!md) return ''
   const cleaned = normalizeAiMarkdown(md)
+    .replace(/\\\[\s*([\s\S]*?)\s*\\\]/g, '\n$$\n$1\n$$\n')
+    .replace(/\\\(\s*(.*?)\s*\\\)/g, '$$$1$$')
+
   let withMath = cleaned.replace(/\$\$([\s\S]+?)\$\$/g, (_, tex) => {
     try {
       return katex.renderToString(tex.trim(), { throwOnError: false, displayMode: true })

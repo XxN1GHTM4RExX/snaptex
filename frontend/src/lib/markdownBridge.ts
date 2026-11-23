@@ -29,63 +29,8 @@ function sanitizeInnerMath(tex: string): string {
     .trim()
 }
 
-/**
- * Universally cleans raw Markdown + LaTeX before parsing so un-delimited equation lines,
- * JSON control-char corruptions, and collapsed tables always render cleanly.
- */
-function preprocessMarkdownForTipTap(markdown: string): string {
-  let text = markdown
-    .replace(/\x08/g, '\\b')
-    .replace(/\x0c/g, '\\f')
-    .replace(/\x09(?=[a-zA-Z])/g, '\\t')
-    .replace(/\\\[\s*([\s\S]*?)\s*\\\]/g, '\n$$\n$1\n$$\n')
-    .replace(/\\\(\s*(.*?)\s*\\\)/g, '$$$1$$')
-    .replace(/\\left\s*\$/g, '\\left(')
-    .replace(/\\right\s*\$/g, '\\right)')
-
-  const latexCmdRegex =
-    /\\(?:frac|dfrac|tfrac|sqrt|sum|prod|int|lim|begin|end|boxed|iff|implies|equiv|le|ge|neq|approx|in|notin|cup|cap|land|lor|sim|forall|exists|left|right|bigl|bigr|biggl|biggr|ln|log|sin|cos|tan|exp)\b/
-
-  const lines = text.split('\n')
-  const out: string[] = []
-  let inDisplayMath = false
-
-  for (const line of lines) {
-    const trimmed = line.trim()
-    if (trimmed === '$$') {
-      inDisplayMath = !inDisplayMath
-      out.push(line)
-      continue
-    }
-    if (inDisplayMath) {
-      out.push(line)
-      continue
-    }
-
-    if (
-      trimmed &&
-      !trimmed.includes('$') &&
-      !trimmed.startsWith('#') &&
-      !trimmed.startsWith('-') &&
-      !trimmed.startsWith('*') &&
-      !trimmed.startsWith('>') &&
-      !trimmed.startsWith('|') &&
-      !/^\d+[\.\)]\s/.test(trimmed) &&
-      latexCmdRegex.test(trimmed)
-    ) {
-      const strippedCmds = trimmed.replace(/\\[a-zA-Z]+/g, '')
-      const proseWords = strippedCmds.match(/\b[a-zA-Z]{4,}\b/g) || []
-      if (proseWords.length <= 3) {
-        out.push('', '$$', trimmed, '$$', '')
-        continue
-      }
-    }
-
-    out.push(line)
-  }
-
-  return out.join('\n')
-}
+const LATEX_CMD_REGEX =
+  /\\(?:frac|dfrac|tfrac|sqrt|sum|prod|int|lim|begin|end|boxed|iff|implies|equiv|le|ge|neq|approx|in|notin|cup|cap|land|lor|sim|forall|exists|left|right|bigl|bigr|biggl|biggr|ln|log|sin|cos|tan|exp|qquad|quad|cdot|to)\b/
 
 export function markdownToHtml(markdown: string): string {
   if (!markdown) return '<p></p>'
@@ -93,24 +38,75 @@ export function markdownToHtml(markdown: string): string {
   const mathBlocks: string[] = []
   const inlineMaths: string[] = []
 
-  const preprocessed = preprocessMarkdownForTipTap(markdown)
-
-  // 1. Protect block math $$...$$ BEFORE marked.parse() touches underscores/backslashes
-  let protectedMd = preprocessed.replace(/\$\$([\s\S]*?)\$\$/g, (_, math) => {
-    const idx = mathBlocks.push(sanitizeInnerMath(math)) - 1
+  const pushBlock = (tex: string) => {
+    const clean = sanitizeInnerMath(tex)
+    if (!clean) return ''
+    const idx = mathBlocks.push(clean) - 1
     return `\n\n@@BLOCK_MATH_${idx}@@\n\n`
-  })
+  }
 
-  // 2. Protect inline math $...$
-  protectedMd = protectedMd.replace(/\$([^\$\n]+?)\$/g, (_, math) => {
-    const idx = inlineMaths.push(sanitizeInnerMath(math)) - 1
+  const pushInline = (tex: string) => {
+    const clean = sanitizeInnerMath(tex)
+    if (!clean) return ''
+    const idx = inlineMaths.push(clean) - 1
     return `@@INLINE_MATH_${idx}@@`
+  }
+
+  // 1. Recover any control-char escapes and normalize inline "--- ### Heading" splits
+  let text = markdown
+    .replace(/\x08/g, '\\b')
+    .replace(/\x0c/g, '\\f')
+    .replace(/\x09(?=[a-zA-Z])/g, '\\t')
+    .replace(/\\left\s*\$/g, '\\left(')
+    .replace(/\\right\s*\$/g, '\\right)')
+    .replace(/([^\n])\s*---\s*(#{1,4}\s+)/g, '$1\n\n---\n\n$2')
+    .replace(/([^\n])\s+(#{1,4}\s+)/g, '$1\n\n$2')
+
+  // 2. Extract multi-line and single-line $$ ... $$ and \[ ... \] blocks FIRST
+  text = text.replace(/\$\$([\s\S]*?)\$\$/g, (_, math) => pushBlock(math))
+  text = text.replace(/\\\[([\s\S]*?)\\\]/g, (_, math) => pushBlock(math))
+
+  // 3. Process line-by-line so math delimiters can NEVER bleed across lines into prose
+  const processedLines = text.split('\n').map((rawLine) => {
+    let line = rawLine
+
+    // Convert \( ... \) directly into @@INLINE_MATH_idx@@ tokens (never intermediate $)
+    line = line.replace(/\\\(([^\n]+?)\\\)/g, (_, math) => pushInline(math))
+
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('@@BLOCK_MATH_')) return line
+
+    // Check if this line is a standalone equation line with raw LaTeX commands outside $...$
+    const outsideDollars = trimmed.replace(/\$[^$\n]*\$/g, ' ')
+    const isListOrHeading = /^(?:#{1,6}\s|[-*>|]|\d+[\.\)]\s)/.test(trimmed)
+
+    if (!isListOrHeading && LATEX_CMD_REGEX.test(outsideDollars)) {
+      const strippedCmds = outsideDollars.replace(/\\[a-zA-Z]+/g, '')
+      const proseWords = strippedCmds.match(/\b[a-zA-Z]{3,}\b/g) || []
+      // Pure equation line (even if it had partial $...$ fragments inside it): unify into one clean block equation
+      if (proseWords.length <= 2) {
+        return pushBlock(trimmed)
+      }
+    }
+
+    // Balance any odd $ on the line so an unclosed $ never swallows following words
+    const dollarMatches = line.match(/\$/g)
+    if (dollarMatches && dollarMatches.length % 2 === 1) {
+      line = `${line}$`
+    }
+
+    // Extract inline $ ... $ on this single line
+    line = line.replace(/\$([^\$\n]+?)\$/g, (_, math) => pushInline(math))
+
+    return line
   })
 
-  // 3. Parse remaining Markdown (headings, lists, tables, bold, italic, images)
+  const protectedMd = processedLines.join('\n')
+
+  // 4. Parse remaining Markdown (headings, lists, tables, bold, italic, images)
   let html = marked.parse(protectedMd, { async: false, gfm: true, breaks: false }) as string
 
-  // 4. Restore TipTap v3 block-math and inline-math nodes
+  // 5. Restore TipTap v3 block-math and inline-math nodes
   html = html.replace(/<p>\s*@@BLOCK_MATH_(\d+)@@\s*<\/p>/g, (_, idx) => {
     const latex = escapeHtmlAttr(mathBlocks[Number(idx)] || '')
     return `<div data-type="block-math" data-latex="${latex}"></div>`
