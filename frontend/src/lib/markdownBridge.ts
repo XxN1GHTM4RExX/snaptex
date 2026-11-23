@@ -21,6 +21,10 @@ function sanitizeInnerMath(tex: string): string {
     .replace(/\x08/g, '\\b')
     .replace(/\x0c/g, '\\f')
     .replace(/\x09(?=[a-zA-Z])/g, '\\t')
+    // KaTeX does not support \tag{...} outside equation environments — render cleanly as \quad (1)
+    .replace(/\\tag\{([^}]*)\}/g, '\\quad ($1)')
+    // Repair single-backslash \[4pt] row spacing inside cases/aligned/matrix environments
+    .replace(/(?<!\\)\\\[(\d+(?:pt|em|mm|cm|ex))\]/g, '\\\\[$1]')
     .replace(/\\\(/g, '(')
     .replace(/\\\)/g, ')')
     .replace(/\\\[/g, '[')
@@ -61,6 +65,8 @@ export function markdownToHtml(markdown: string): string {
     .replace(/\\right\s*\$/g, '\\right)')
     .replace(/([^\n])\s*---\s*(#{1,4}\s+)/g, '$1\n\n---\n\n$2')
     .replace(/([^\n])\s+(#{1,4}\s+)/g, '$1\n\n$2')
+    // Repair \[4pt] spacing commands before matching display \[ ... \] blocks
+    .replace(/(?<!\\)\\\[(\d+(?:pt|em|mm|cm|ex))\]/g, '\\\\[$1]')
 
   // 2. Extract multi-line and single-line $$ ... $$ and \[ ... \] blocks FIRST
   text = text.replace(/\$\$([\s\S]*?)\$\$/g, (_, math) => pushBlock(math))
