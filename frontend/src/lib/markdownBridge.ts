@@ -8,14 +8,6 @@ function escapeHtmlAttr(str: string): string {
     .replace(/>/g, '&gt;')
 }
 
-function unescapeHtmlAttr(str: string): string {
-  return str
-    .replace(/&quot;/g, '"')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&amp;/g, '&')
-}
-
 function sanitizeInnerMath(tex: string): string {
   return tex
     .replace(/\x08/g, '\\b')
@@ -129,55 +121,116 @@ export function markdownToHtml(markdown: string): string {
   return html
 }
 
+/**
+ * DOM-based serializer: extracts clean Markdown + LaTeX from TipTap HTML without
+ * regex corruption on `<` signs (like `-12 < 0`), nested tags, or GFM tables.
+ */
 export function htmlToMarkdown(html: string): string {
   if (!html) return ''
 
-  let md = html
-    .replace(/<div[^>]*data-type="block-math"[^>]*data-latex="([^"]*)"[^>]*><\/div>/g, (_, latex) => `\n$$\n${unescapeHtmlAttr(latex)}\n$$\n`)
-    .replace(/<div[^>]*data-latex="([^"]*)"[^>]*data-type="block-math"[^>]*><\/div>/g, (_, latex) => `\n$$\n${unescapeHtmlAttr(latex)}\n$$\n`)
-    .replace(/<span[^>]*data-type="inline-math"[^>]*data-latex="([^"]*)"[^>]*><\/span>/g, (_, latex) => `$${unescapeHtmlAttr(latex)}$`)
-    .replace(/<span[^>]*data-latex="([^"]*)"[^>]*data-type="inline-math"[^>]*><\/span>/g, (_, latex) => `$${unescapeHtmlAttr(latex)}$`)
+  const doc = new DOMParser().parseFromString(html, 'text/html')
 
-  md = md.replace(/<table[^>]*>([\s\S]*?)<\/table>/gi, (_, tableInner) => {
+  function serializeInline(node: Node): string {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return node.textContent || ''
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return ''
+
+    const el = node as HTMLElement
+    const tag = el.tagName.toLowerCase()
+    const dataType = el.getAttribute('data-type')
+
+    if (dataType === 'inline-math') {
+      const latex = (el.getAttribute('data-latex') || '').trim()
+      return latex ? `$${latex}$` : ''
+    }
+    if (dataType === 'block-math') {
+      const latex = (el.getAttribute('data-latex') || '').trim()
+      return latex ? `\n\n$$\n${latex}\n$$\n\n` : ''
+    }
+
+    const inner = Array.from(el.childNodes).map(serializeInline).join('')
+
+    if (tag === 'strong' || tag === 'b') return inner ? `**${inner}**` : ''
+    if (tag === 'em' || tag === 'i') return inner ? `*${inner}*` : ''
+    if (tag === 'code') return inner ? `\`${inner}\`` : ''
+    if (tag === 'br') return '\n'
+    if (tag === 'img') {
+      const src = el.getAttribute('src') || ''
+      const alt = el.getAttribute('alt') || 'image'
+      return src ? `![${alt}](${src})` : ''
+    }
+
+    return inner
+  }
+
+  function serializeTable(tableEl: HTMLElement): string {
     const rows: string[][] = []
-    const rowMatches = tableInner.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || []
-    for (const rowHtml of rowMatches) {
-      const cells: string[] = []
-      const cellMatches = rowHtml.match(/<(?:th|td)[^>]*>([\s\S]*?)<\/(?:th|td)>/gi) || []
-      for (const cellHtml of cellMatches) {
-        const cleanCell = cellHtml
-          .replace(/<\/?(?:th|td|p)[^>]*>/gi, ' ')
-          .replace(/<strong>(.*?)<\/strong>/gi, '**$1**')
-          .replace(/<em>(.*?)<\/em>/gi, '*$1*')
-          .replace(/<[^>]+>/g, '')
+    const trs = Array.from(tableEl.querySelectorAll('tr'))
+    for (const tr of trs) {
+      const cells = Array.from(tr.querySelectorAll('th, td')).map((cell) =>
+        Array.from(cell.childNodes)
+          .map(serializeInline)
+          .join('')
           .replace(/\s+/g, ' ')
           .trim()
-        cells.push(cleanCell)
-      }
+      )
       if (cells.length > 0) rows.push(cells)
     }
     if (rows.length === 0) return ''
-    const colCount = Math.max(...rows.map(r => r.length))
+    const colCount = Math.max(...rows.map((r) => r.length))
     const padRow = (r: string[]) =>
       `| ${Array.from({ length: colCount }, (_, i) => r[i] ?? '').join(' | ')} |`
     const header = padRow(rows[0])
     const separator = `| ${Array.from({ length: colCount }, () => '---').join(' | ')} |`
     const body = rows.slice(1).map(padRow).join('\n')
     return `\n\n${header}\n${separator}${body ? `\n${body}` : ''}\n\n`
-  })
+  }
 
-  return md
-    .replace(/<hr\s*\/?>/gi, '\n\n---\n\n')
-    .replace(/<h1[^>]*>(.*?)<\/h1>/gi, '# $1\n\n')
-    .replace(/<h2[^>]*>(.*?)<\/h2>/gi, '## $1\n\n')
-    .replace(/<h3[^>]*>(.*?)<\/h3>/gi, '### $1\n\n')
-    .replace(/<li[^>]*>(.*?)<\/li>/gi, '- $1\n')
-    .replace(/<\/?(ul|ol)[^>]*>/gi, '\n')
-    .replace(/<p[^>]*>(.*?)<\/p>/gi, '$1\n\n')
-    .replace(/<strong>(.*?)<\/strong>/gi, '**$1**')
-    .replace(/<em>(.*?)<\/em>/gi, '*$1*')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
+  function serializeBlock(node: Node): string {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return (node.textContent || '').trim()
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return ''
+
+    const el = node as HTMLElement
+    const tag = el.tagName.toLowerCase()
+    const dataType = el.getAttribute('data-type')
+
+    if (dataType === 'block-math') {
+      const latex = (el.getAttribute('data-latex') || '').trim()
+      return latex ? `\n\n$$\n${latex}\n$$\n\n` : ''
+    }
+    if (tag === 'hr') return '\n\n---\n\n'
+    if (tag === 'h1') return `\n\n# ${serializeInline(el).trim()}\n\n`
+    if (tag === 'h2') return `\n\n## ${serializeInline(el).trim()}\n\n`
+    if (tag === 'h3') return `\n\n### ${serializeInline(el).trim()}\n\n`
+    if (tag === 'h4') return `\n\n#### ${serializeInline(el).trim()}\n\n`
+    if (tag === 'table') return serializeTable(el)
+    if (tag === 'blockquote') {
+      const text = Array.from(el.childNodes).map(serializeBlock).join('\n').trim()
+      return `\n\n> ${text.replace(/\n+/g, '\n> ')}\n\n`
+    }
+    if (tag === 'ul') {
+      const items = Array.from(el.children)
+        .filter((c) => c.tagName.toLowerCase() === 'li')
+        .map((li) => `- ${serializeInline(li).trim()}`)
+      return `\n\n${items.join('\n')}\n\n`
+    }
+    if (tag === 'ol') {
+      const items = Array.from(el.children)
+        .filter((c) => c.tagName.toLowerCase() === 'li')
+        .map((li, i) => `${i + 1}. ${serializeInline(li).trim()}`)
+      return `\n\n${items.join('\n')}\n\n`
+    }
+    if (tag === 'p') {
+      const content = serializeInline(el).trim()
+      return content ? `\n\n${content}\n\n` : ''
+    }
+
+    return Array.from(el.childNodes).map(serializeBlock).join('')
+  }
+
+  const rawMd = Array.from(doc.body.childNodes).map(serializeBlock).join('')
+  return rawMd.replace(/\n{3,}/g, '\n\n').trim()
 }
