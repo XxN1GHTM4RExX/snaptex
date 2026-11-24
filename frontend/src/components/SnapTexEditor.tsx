@@ -432,11 +432,17 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
     if (!explanationText) return
 
     const notePrefix = lang === 'fr' ? 'Note du Copilote' : 'Copilot Note'
+    const noteMarkdown = `> **${notePrefix}:**\n>\n${normalizeAiMarkdown(explanationText)
+      .split('\n')
+      .map(line => `> ${line}`)
+      .join('\n')}`
+    const noteHtml = markdownToHtml(noteMarkdown)
+
     const insertPos = taggedSpot ? taggedSpot.to : editor.state.selection.to
     editor
       .chain()
       .focus()
-      .insertContentAt(insertPos, `\n\n> **${notePrefix}:** ${normalizeAiMarkdown(explanationText)}\n\n`)
+      .insertContentAt(insertPos, noteHtml)
       .run()
 
     if (typeof window !== 'undefined' && window.innerWidth < 768) {
@@ -463,6 +469,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
           .snaptex-prose em, .snaptex-prose i { font-style: italic !important; color: #fafafa; }
           .snaptex-prose ul { list-style-type: disc; padding-left: 1.5rem; margin: 0.5rem 0; }
           .snaptex-prose ol { list-style-type: decimal; padding-left: 1.5rem; margin: 0.5rem 0; }
+          .snaptex-prose blockquote { border-left: 3px solid #f43f5e; background: rgba(244, 63, 94, 0.06); padding: 0.65rem 1rem; margin: 0.85rem 0; border-radius: 0 0.5rem 0.5rem 0; color: #e4e4e7; }
           .snaptex-prose table { border-collapse: collapse; width: 100%; margin: 1rem 0; display: block; overflow-x: auto; }
           .snaptex-prose th, .snaptex-prose td { border: 1px solid #3f3f46; padding: 0.5rem 0.75rem; text-align: left; }
           .snaptex-prose th { background-color: #27272a; font-weight: 600; color: #fff; }
@@ -487,7 +494,7 @@ export const SnapTexEditor: React.FC<SnapTexEditorProps> = ({
           @media print {
             body { background: #fff !important; color: #000 !important; }
             .snaptex-prose, .snaptex-prose p, .snaptex-prose h1, .snaptex-prose h2, .snaptex-prose h3,
-            .snaptex-prose strong, .snaptex-prose em,
+            .snaptex-prose strong, .snaptex-prose em, .snaptex-prose blockquote,
             .snaptex-prose li, .snaptex-prose td, .snaptex-prose th,
             .snaptex-prose [data-type="inline-math"], .snaptex-prose [data-type="block-math"],
             .tiptap-mathematics-render, .katex {
