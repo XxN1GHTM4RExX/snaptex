@@ -177,8 +177,112 @@ def html_table_to_grid(html: str) -> str:
     return "\n\n" + "\n".join(out) + "\n\n"
 
 
+class _TableNormalizer(HTMLParser):
+    """Rebuilds a table with flat lists and no empty cells.
+
+    OCR sometimes emits a stray trailing <td> (a blank column) and nests <ul>
+    inside <li> for secondary bullets. Both are fixed before editor/export.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.rows: list[str] = []
+        self._cells: list[str] | None = None
+        self._cell: list[str] | None = None
+        self._cell_tag = ""
+        self._li_open = False
+
+    def _close_li(self) -> None:
+        if self._li_open and self._cell is not None:
+            self._cell.append("</li>")
+            self._li_open = False
+
+    def _flush_cell(self) -> None:
+        if self._cell is None or self._cells is None:
+            return
+        self._close_li()
+        html = "".join(self._cell).strip()
+        # Restore a single <ul> wrapper so the editor renders flattened
+        # <li> items as a real list (the nested wrappers were removed).
+        if "<li>" in html and "<ul>" not in html:
+            html = f"<ul>{html}</ul>"
+        # Drop cells with no text at all (the blank trailing column).
+        if re.sub(r"<[^>]+>", "", html).strip():
+            self._cells.append(f"<{self._cell_tag}>{html}</{self._cell_tag}>")
+        self._cell = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "tr":
+            self._cells = []
+            return
+        if tag in ("td", "th") and self._cells is not None:
+            self._flush_cell()
+            self._cell_tag, self._cell = tag, []
+            self._li_open = False
+            return
+        if self._cell is None:
+            return
+        if tag in ("ul", "ol"):
+            # Nested list => flatten: close the parent <li>, emit siblings.
+            self._close_li()
+            return
+        if tag == "li":
+            self._close_li()
+            self._cell.append("<li>")
+            self._li_open = True
+            return
+        attr_str = "".join(f' {k}="{v}"' for k, v in attrs if v is not None)
+        self._cell.append(f"<{tag}{attr_str}>")
+
+    def handle_endtag(self, tag):
+        if tag in ("ul", "ol"):
+            self._close_li()
+            return
+        if tag == "li":
+            self._close_li()
+            return
+        if tag in ("td", "th"):
+            self._flush_cell()
+            return
+        if tag == "tr" and self._cells is not None:
+            self.rows.append("".join(self._cells))
+            self._cells = None
+            return
+        if self._cell is not None:
+            self._cell.append(f"</{tag}>")
+
+    def handle_data(self, data):
+        if self._cell is not None:
+            self._cell.append(data)
+
+    def normalized_table(self) -> str:
+        rows = "".join(f"<tr>{r}</tr>" for r in self.rows if r)
+        return f"<table><tbody>{rows}</tbody></table>" if rows else ""
+
+
+def normalize_html_tables(text: str) -> str:
+    """Fix OCR table artifacts before storage and export.
+
+    - Empty <td>/<th> cells are removed, killing the blank trailing column.
+    - Nested <ul> lists inside a cell are flattened to sibling <li> items.
+    """
+    if not text or "<table" not in text.lower():
+        return text
+
+    def repl(match: re.Match) -> str:
+        n = _TableNormalizer()
+        try:
+            n.feed(match.group(0))
+            n.close()
+            return n.normalized_table() or match.group(0)
+        except Exception:
+            return match.group(0)
+
+    return _TABLE_RE.sub(repl, text)
+
+
 def html_tables_to_grid_markdown(text: str) -> str:
     """Replaces every <table> block in `text` with an equivalent pandoc grid table."""
     if not text or "<table" not in text.lower():
         return text
-    return _TABLE_RE.sub(lambda m: html_table_to_grid(m.group(0)), text)
+    return _TABLE_RE.sub(lambda m: html_table_to_grid(normalize_html_tables(m.group(0))), text)
