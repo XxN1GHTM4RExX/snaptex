@@ -355,6 +355,63 @@ def crop_and_clean_diagram(image: Image.Image, coords: list, aggressive_whitenin
     return f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode('utf-8')}"
 
 
+# vtracer's pixel API allocates one Python tuple per pixel. A 1500 px scan can
+# yield >2M tuples (~200 MB) and OOM the 512 MB Render instance. The native
+# decoders accept PNG bytes, so pass the already-preprocessed image as bytes.
+_VTRACER_COMMON = dict(
+    hierarchical="stacked",
+    mode="spline",
+    filter_speckle=4,
+    color_precision=6,
+    layer_difference=16,
+    corner_threshold=60,
+    length_threshold=4.0,
+    max_iterations=10,
+    splice_threshold=45,
+    path_precision=3,
+)
+_MAX_TRACE_PIXELS = 600_000  # hard ceiling for the legacy pixel API
+
+
+def _trace_diagram(prep_pil: Image.Image, color_mode: str) -> str:
+    """Vectorize a preprocessed image without a Python tuple per pixel."""
+    buf = io.BytesIO()
+    prep_pil.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+
+    attempts = []
+    if hasattr(vtracer, "Config") and hasattr(vtracer, "convert_bytes"):
+        # vtracer >= 1.0: byte decoder with a Config object.
+        cfg = dict(_VTRACER_COMMON)
+        cfg["clustering"] = "bw" if color_mode == "binary" else "color-cluster"
+        attempts.append(lambda: vtracer.Config(**cfg).convert_bytes(png_bytes))
+    if hasattr(vtracer, "convert_image_to_svg"):
+        # vtracer 0.6.x: byte decoder with the legacy colormode option.
+        opts = dict(_VTRACER_COMMON)
+        opts["colormode"] = "binary" if color_mode == "binary" else "color"
+        attempts.append(lambda: vtracer.convert_image_to_svg(png_bytes, **opts))
+
+    for attempt in attempts:
+        try:
+            return attempt()
+        except (TypeError, AttributeError, ValueError) as e:
+            print(f"[Vtracer] byte API rejected options ({e}); trying next path.")
+
+    # Last resort: bindings with no byte decoder. Cap the pixel count so the
+    # tuple list stays bounded on the 512 MB instance.
+    width, height = prep_pil.size
+    scale = min(1.0, (_MAX_TRACE_PIXELS / max(1, width * height)) ** 0.5)
+    if scale < 1.0:
+        new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+        prep_pil = prep_pil.resize(new_size, Image.Resampling.LANCZOS)
+        width, height = new_size
+    opts = dict(_VTRACER_COMMON)
+    opts["colormode"] = "binary" if color_mode == "binary" else "color"
+    return vtracer.convert_pixels_to_svg(
+        list(prep_pil.getdata()), size=(width, height), **opts
+    )
+
+
 def vectorize_diagram_vtracer(image: Image.Image, coords: list, color_mode: str = "binary") -> str:
     """
     Tier 2 & Tier 3: Vectorizes cropped diagrams into crisp SVGs using Vtracer.
@@ -382,24 +439,7 @@ def vectorize_diagram_vtracer(image: Image.Image, coords: list, color_mode: str 
             balanced = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2RGB)
             prep_pil = Image.fromarray(balanced).convert("RGBA")
 
-        raw_pixels = list(prep_pil.getdata())
-        width, height = prep_pil.size
-
-        svg_str = vtracer.convert_pixels_to_svg(
-            raw_pixels,
-            size=(width, height),
-            colormode=color_mode,
-            hierarchical="stacked",
-            mode="spline",
-            filter_speckle=4,
-            color_precision=6,
-            layer_difference=16,
-            corner_threshold=60,
-            length_threshold=4.0,
-            max_iterations=10,
-            splice_threshold=45,
-            path_precision=3
-        )
+        svg_str = _trace_diagram(prep_pil, color_mode)
 
         svg_b64 = base64.b64encode(svg_str.encode("utf-8")).decode("utf-8")
         return f"data:image/svg+xml;base64,{svg_b64}"
