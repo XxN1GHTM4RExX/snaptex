@@ -9,6 +9,70 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 
+def _child_or_add(parent, tag: str, before: tuple):
+    """Find an OOXML child or create it before the listed successor tags."""
+    el = parent.find(qn(tag))
+    if el is None:
+        el = OxmlElement(tag)
+        parent.insert_element_before(el, *before)
+    return el
+
+
+# OOXML child order for the elements we touch. python-docx does not enforce it,
+# but Word and stricter readers do.
+_TBLW_BEFORE = (
+    'w:jc', 'w:tblCellSpacing', 'w:tblInd', 'w:tblBorders', 'w:shd',
+    'w:tblLayout', 'w:tblCellMar', 'w:tblLook', 'w:tblCaption', 'w:tblDescription',
+)
+_LAYOUT_BEFORE = ('w:tblCellMar', 'w:tblLook', 'w:tblCaption', 'w:tblDescription')
+_TCMAR_BEFORE = ('w:textDirection', 'w:tcFitText', 'w:vAlign', 'w:hideMark')
+_PPR_TAIL = (
+    'w:contextualSpacing', 'w:mirrorIndents', 'w:suppressOverlap', 'w:jc',
+    'w:textDirection', 'w:textAlignment', 'w:textboxTightWrap', 'w:outlineLvl',
+    'w:divId', 'w:cnfStyle', 'w:rPr', 'w:sectPr', 'w:pPrChange',
+)
+
+
+def compact_table_geometry(table):
+    """Make pandoc tables fit Word pages without clipped text or page-split rows."""
+    tblPr = table._tbl.tblPr
+
+    tblW = _child_or_add(tblPr, 'w:tblW', _TBLW_BEFORE)
+    tblW.set(qn('w:w'), '5000')       # percent units: 5000 = 100% of page width
+    tblW.set(qn('w:type'), 'pct')
+
+    layout = _child_or_add(tblPr, 'w:tblLayout', _LAYOUT_BEFORE)
+    layout.set(qn('w:type'), 'autofit')
+
+    for row in table.rows:
+        for cell in row.cells:
+            tcPr = cell._tc.get_or_add_tcPr()
+            tcMar = _child_or_add(tcPr, 'w:tcMar', _TCMAR_BEFORE)
+            for side, value in (('top', 60), ('left', 100), ('bottom', 60), ('right', 100)):
+                node = tcMar.find(qn(f'w:{side}'))
+                if node is None:
+                    node = OxmlElement(f'w:{side}')
+                    tcMar.append(node)
+                node.set(qn('w:w'), str(value))
+                node.set(qn('w:type'), 'dxa')
+
+            for paragraph in cell.paragraphs:
+                pPr = paragraph._p.get_or_add_pPr()
+                if pPr.find(qn('w:numPr')) is None:
+                    continue
+
+                # Word's default ~0.5 in list indent eats narrow grid columns.
+                ind = _child_or_add(pPr, 'w:ind', _PPR_TAIL)
+                ind.set(qn('w:left'), '260')
+                ind.set(qn('w:hanging'), '180')
+
+                spacing = _child_or_add(pPr, 'w:spacing', ('w:ind',) + _PPR_TAIL)
+                spacing.set(qn('w:before'), '0')
+                spacing.set(qn('w:after'), '40')
+                spacing.set(qn('w:line'), '240')
+                spacing.set(qn('w:lineRule'), 'auto')
+
+
 def apply_table_borders(docx_path: str):
     """Parses the generated docx file and forces explicit XML table grid borders
     on every table element, and stops rows splitting across page breaks.
@@ -54,6 +118,8 @@ def apply_table_borders(docx_path: str):
                 'w:jc',
                 'w:hidden',
             )
+
+        compact_table_geometry(table)
 
     doc.save(docx_path)
 
