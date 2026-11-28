@@ -11,7 +11,7 @@ from docx.oxml.ns import qn
 
 def apply_table_borders(docx_path: str):
     """Parses the generated docx file and forces explicit XML table grid borders
-    on every table element.
+    on every table element, and stops rows splitting across page breaks.
     """
     doc = Document(docx_path)
 
@@ -33,6 +33,10 @@ def apply_table_borders(docx_path: str):
             new_borders.append(border)
 
         tblPr.append(new_borders)
+
+        for row in table.rows:
+            trPr = row._tr.get_or_add_trPr()
+            trPr.append(OxmlElement('w:cantSplit'))
 
     doc.save(docx_path)
 
