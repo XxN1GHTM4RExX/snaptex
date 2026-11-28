@@ -1,7 +1,9 @@
 import io
 import re
+import time
 import base64
 import urllib.parse
+from functools import wraps
 import cv2
 import numpy as np
 from PIL import Image, ImageChops
@@ -43,6 +45,27 @@ def _encode_image_for_openai_compat(image_obj: Image.Image, max_dim: int = 1600)
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
+_MODEL_CACHE_TTL = 3600  # seconds; provider model lists do not change per page
+_model_cache: dict = {}
+
+
+def _cached_models(fn):
+    """Cache a successful model discovery result for _MODEL_CACHE_TTL seconds."""
+    @wraps(fn)
+    def wrapper(*args):
+        key = (fn.__name__,) + tuple(str(a) for a in args)
+        hit = _model_cache.get(key)
+        now = time.monotonic()
+        if hit and now - hit[0] < _MODEL_CACHE_TTL:
+            return list(hit[1])
+        result = fn(*args)
+        if result:  # never cache an empty/failed discovery
+            _model_cache[key] = (now, list(result))
+        return result
+    return wrapper
+
+
+@_cached_models
 def _discover_google_models(client: genai.Client) -> list:
     """Dynamically fetches live Gemini 3.x+ models supporting generateContent while skipping deprecated 2.x/image slugs."""
     discovered = []
@@ -62,6 +85,7 @@ def _discover_google_models(client: genai.Client) -> list:
     return discovered
 
 
+@_cached_models
 def _discover_groq_vision_models(api_key: str) -> list:
     """Queries Groq /models endpoint for currently active vision/multimodal models."""
     try:
@@ -78,6 +102,7 @@ def _discover_groq_vision_models(api_key: str) -> list:
     return []
 
 
+@_cached_models
 def _discover_openrouter_free_vision_models() -> list:
     """Queries OpenRouter /models endpoint for active :free models that accept image inputs."""
     try:
