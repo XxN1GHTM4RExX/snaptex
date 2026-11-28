@@ -20,6 +20,7 @@ from ocr_engine import process_image_with_gemini
 from blur_detector import calculate_blur_score
 from key_manager import provider_manager
 from exporter import apply_table_borders
+from table_export import html_tables_to_grid_markdown
 from database import (
     save_transcription,
     fetch_recent_transcriptions,
@@ -520,6 +521,11 @@ def _build_export_bytes(title: str, markdown_content: str, fmt: str) -> tuple[by
     """Converts Markdown + LaTeX into .docx, .tex, or .pdf bytes."""
     safe_title = re.sub(r'[\\/*?:"<>|]', "_", title.strip() or "SnapTex_Document")
     md_content = f"# {title.strip()}\n\n{markdown_content}"
+
+    # Pandoc's Markdown reader drops raw HTML, so an HTML table would vanish from
+    # the export. Rewrite each one as a grid table so it survives as a real table.
+    md_content = html_tables_to_grid_markdown(md_content)
+
     fmt = fmt.lower().strip()
 
     if fmt == "tex":
