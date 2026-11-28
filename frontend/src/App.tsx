@@ -28,6 +28,62 @@ function formatApiError(errData: any, fallback: string): string {
   return JSON.stringify(errData.detail)
 }
 
+/**
+ * Word cannot render the SVG data URIs emitted by vtracer: pandoc embeds them
+ * as .svg parts that silently disappear. PNG data URIs embed as real drawings,
+ * so rasterize in the browser before posting the document for export.
+ */
+async function svgImagesToPng(markdown: string): Promise<string> {
+  const pattern = /!\[([^\]]*)\]\(data:image\/svg\+xml;base64,([A-Za-z0-9+/=]+)\)/g
+  const matches = Array.from(markdown.matchAll(pattern))
+  if (matches.length === 0) return markdown
+
+  const pairs = await Promise.all(matches.map(async (m) => {
+    try {
+      const bytes = Uint8Array.from(atob(m[2]), (c) => c.charCodeAt(0))
+      let svg = new TextDecoder().decode(bytes)
+
+      // The canvas needs intrinsic dimensions; vtracer SVGs may carry only a viewBox.
+      if (!/\swidth=/.test(svg.slice(0, 500))) {
+        const vb = svg.match(/viewBox\s*=\s*["']([^"']+)["']/)
+        if (vb) {
+          const nums = vb[1].trim().split(/[\s,]+/).map(Number)
+          const w = nums[2] || 800
+          const h = nums[3] || 800
+          svg = svg.replace(/<svg\b/, `<svg width="${w}" height="${h}"`)
+        }
+      }
+
+      const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }))
+      try {
+        const img = new Image()
+        img.src = url
+        await img.decode()
+        const canvas = document.createElement('canvas')
+        canvas.width = img.naturalWidth || 800
+        canvas.height = img.naturalHeight || 800
+        const ctx = canvas.getContext('2d')
+        if (!ctx) throw new Error('canvas 2d context unavailable')
+        ctx.fillStyle = '#ffffff'
+        ctx.fillRect(0, 0, canvas.width, canvas.height)
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+        return { from: m[0], to: `![${m[1]}](${canvas.toDataURL('image/png')})` }
+      } finally {
+        URL.revokeObjectURL(url)
+      }
+    } catch (err) {
+      console.warn('[export] SVG rasterization failed; diagram may be missing:', err)
+      return { from: m[0], to: m[0] }
+    }
+  }))
+
+  let out = markdown
+  for (const p of pairs) {
+    if (p.to !== p.from) out = out.split(p.from).join(p.to)
+  }
+  return out
+}
+
 export default function App() {
   const [lang, setLang] = useState<Language>(() => {
     const saved = localStorage.getItem('snaptex_lang')
@@ -351,6 +407,7 @@ export default function App() {
     try {
       const token = await getAuthToken()
       if (!token) throw new Error('Session expired. Please sign in again.')
+      const exportMarkdown = await svgImagesToPng(latestMarkdown)
 
       const res = await fetch(`${API_URL}/export-document`, {
         method: 'POST',
@@ -360,7 +417,7 @@ export default function App() {
         },
         body: JSON.stringify({
           title: currentDoc.title,
-          markdown_content: latestMarkdown,
+          markdown_content: exportMarkdown,
           format,
         }),
       })
