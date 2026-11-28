@@ -31,6 +31,7 @@ export function markdownToHtml(markdown: string): string {
 
   const mathBlocks: string[] = []
   const inlineMaths: string[] = []
+  const htmlTables: string[] = []
 
   const pushBlock = (tex: string) => {
     const clean = sanitizeInnerMath(tex)
@@ -58,7 +59,14 @@ export function markdownToHtml(markdown: string): string {
     // Repair \[4pt] / \[0.5em] spacing commands before matching display \[ ... \] blocks
     .replace(/(?<!\\)\\\[\s*(\d+(?:\.\d+)?(?:pt|em|mm|cm|ex))\s*\]/g, '\\\\[$1]')
 
-  // 2. Extract multi-line and single-line $$ ... $$ and \[ ... \] blocks FIRST
+  // 2. Protect HTML tables: a single-line <table> can contain LaTeX commands in
+  //    data-latex attributes and would otherwise be wrapped as a display-math block.
+  text = text.replace(/<table\b[\s\S]*?<\/table>/gi, (table) => {
+    const idx = htmlTables.push(table) - 1
+    return `\n\n@@HTML_TABLE_${idx}@@\n\n`
+  })
+
+  // 3. Extract multi-line and single-line $$ ... $$ and \[ ... \] blocks FIRST
   text = text.replace(/\$\$([\s\S]*?)\$\$/g, (_, math) => pushBlock(math))
   text = text.replace(/\\\[([\s\S]*?)\\\]/g, (_, math) => pushBlock(math))
 
@@ -102,7 +110,11 @@ export function markdownToHtml(markdown: string): string {
   // 4. Parse remaining Markdown (headings, lists, tables, bold, italic, images)
   let html = marked.parse(protectedMd, { async: false, gfm: true, breaks: false }) as string
 
-  // 5. Restore TipTap v3 block-math and inline-math nodes
+  // 5. Restore protected HTML tables before math nodes, verbatim.
+  html = html.replace(/<p>\s*@@HTML_TABLE_(\d+)@@\s*<\/p>/g, (_m, idx) => htmlTables[Number(idx)] ?? '')
+  html = html.replace(/@@HTML_TABLE_(\d+)@@/g, (_m, idx) => htmlTables[Number(idx)] ?? '')
+
+  // 6. Restore TipTap v3 block-math and inline-math nodes
   html = html.replace(/<p>\s*@@BLOCK_MATH_(\d+)@@\s*<\/p>/g, (_, idx) => {
     const latex = escapeHtmlAttr(mathBlocks[Number(idx)] || '')
     return `<div data-type="block-math" data-latex="${latex}"></div>`
