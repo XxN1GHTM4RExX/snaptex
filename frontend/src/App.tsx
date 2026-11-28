@@ -157,8 +157,12 @@ export default function App() {
     link.href =
       "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23e11d48'/%3E%3Cpath d='M16 6l2.4 7.6L26 16l-7.6 2.4L16 26l-2.4-7.6L6 16l7.6-2.4L16 6z' fill='%23ffffff'/%3E%3C/svg%3E"
 
-    // Wake up Render backend immediately so cold starts don't eat into upload time
-    fetch(`${API_URL}/`).catch(() => {})
+    // Wake up Render backend immediately so cold starts don't eat into upload time,
+    // then keep it warm while a tab is open (free tier sleeps after ~15 min idle).
+    const ping = () => { fetch(`${API_URL}/`).catch(() => {}) }
+    ping()
+    const keepAlive = window.setInterval(ping, 5 * 60 * 1000)
+    return () => window.clearInterval(keepAlive)
   }, [API_URL])
 
   useEffect(() => {
