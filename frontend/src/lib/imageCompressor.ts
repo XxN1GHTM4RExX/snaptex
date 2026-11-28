@@ -2,11 +2,15 @@
  * Compresses large phone camera photos before upload while preserving
  * crisp legibility for STEM handwriting and LaTeX OCR.
  * PDFs and already-small images (< 600 KB) are passed through untouched.
+ *
+ * 1500 px / q0.82 caps decoded pixel memory on the 512 MB Render instance and
+ * cuts mobile-data upload size; vtracer crops are smaller regions, so diagram
+ * fidelity is unaffected.
  */
 export async function compressImageForOcr(
   file: File,
-  maxDimension = 1800,
-  quality = 0.85
+  maxDimension = 1500,
+  quality = 0.82
 ): Promise<File> {
   if (!file.type.startsWith('image/') || file.type === 'image/gif') {
     return file
