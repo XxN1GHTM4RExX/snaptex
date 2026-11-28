@@ -46,6 +46,30 @@ def save_transcription(
         return {}
 
 
+def count_recent_uploads(access_token: str, user_id: str, since_iso: str) -> int | None:
+    """Count a user's transcriptions created since `since_iso`.
+
+    Returns None on any error so callers can fail open — a Supabase hiccup must
+    never block uploads. RLS is enforced by the user token; the explicit user_id
+    filter is defence in depth.
+    """
+    try:
+        supabase = get_supabase_client(access_token=access_token)
+        response = (
+            supabase.table("transcriptions")
+            .select("id", count="exact")
+            .eq("user_id", user_id)
+            .gte("created_at", since_iso)
+            .execute()
+        )
+        if getattr(response, "count", None) is not None:
+            return int(response.count)
+        return len(response.data or [])
+    except Exception as e:
+        print(f"Upload count failed: {e}")
+        return None
+
+
 def fetch_recent_transcriptions(access_token: str, limit: int = 10) -> list:
     """Fetches the most recent transcriptions for the authenticated user."""
     try:
