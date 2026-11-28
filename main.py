@@ -167,9 +167,23 @@ def _universal_latex_markdown_sanitizer(text: str | None) -> str | None:
     out_lines: List[str] = []
     in_display_math = False
     in_table = False
+    in_html_table = False
 
     for raw_line in lines:
         stripped = raw_line.strip()
+        lower = stripped.lower()
+
+        # HTML tables are structural: never rewrite their lines as LaTeX or Markdown.
+        if in_html_table:
+            out_lines.append(raw_line)
+            if "</table>" in lower:
+                in_html_table = False
+            continue
+        if "<table" in lower:
+            out_lines.append(raw_line)
+            if "</table>" not in lower:
+                in_html_table = True
+            continue
 
         if stripped == "$$":
             in_display_math = not in_display_math

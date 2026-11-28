@@ -164,27 +164,83 @@ export function htmlToMarkdown(html: string): string {
     return inner
   }
 
-  function serializeTable(tableEl: HTMLElement): string {
-    const rows: string[][] = []
-    const trs = Array.from(tableEl.querySelectorAll('tr'))
-    for (const tr of trs) {
-      const cells = Array.from(tr.querySelectorAll('th, td')).map((cell) =>
-        Array.from(cell.childNodes)
-          .map(serializeInline)
-          .join('')
-          .replace(/\s+/g, ' ')
-          .trim()
-      )
-      if (cells.length > 0) rows.push(cells)
+  function escapeCellText(text: string): string {
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+  }
+
+  /** Keeps cell internals (paragraphs, lists, math nodes) so tables survive a save. */
+  function serializeCellNode(node: Node): string {
+    if (node.nodeType === Node.TEXT_NODE) return escapeCellText(node.textContent || '')
+    if (node.nodeType !== Node.ELEMENT_NODE) return ''
+
+    const el = node as HTMLElement
+    const tag = el.tagName.toLowerCase()
+    const dataType = el.getAttribute('data-type')
+
+    if (dataType === 'inline-math') {
+      const latex = (el.getAttribute('data-latex') || '').trim()
+      return latex ? `<span data-type="inline-math" data-latex="${escapeHtmlAttr(latex)}"></span>` : ''
     }
+    if (dataType === 'block-math') {
+      const latex = (el.getAttribute('data-latex') || '').trim()
+      return latex ? `<div data-type="block-math" data-latex="${escapeHtmlAttr(latex)}"></div>` : ''
+    }
+
+    const inner = Array.from(el.childNodes).map(serializeCellNode).join('')
+
+    switch (tag) {
+      case 'br':
+        return '<br>'
+      case 'strong':
+      case 'b':
+        return `<strong>${inner}</strong>`
+      case 'em':
+      case 'i':
+        return `<em>${inner}</em>`
+      case 'code':
+        return `<code>${inner}</code>`
+      case 'p':
+        return `<p>${inner}</p>`
+      case 'ul':
+        return `<ul>${inner}</ul>`
+      case 'ol':
+        return `<ol>${inner}</ol>`
+      case 'li':
+        return `<li>${inner}</li>`
+      case 'img': {
+        const src = el.getAttribute('src') || ''
+        const alt = el.getAttribute('alt') || ''
+        return src ? `<img src="${escapeHtmlAttr(src)}" alt="${escapeHtmlAttr(alt)}">` : ''
+      }
+      default:
+        return inner
+    }
+  }
+
+  function serializeTable(tableEl: HTMLElement): string {
+    const rows = Array.from(tableEl.querySelectorAll('tr'))
     if (rows.length === 0) return ''
-    const colCount = Math.max(...rows.map((r) => r.length))
-    const padRow = (r: string[]) =>
-      `| ${Array.from({ length: colCount }, (_, i) => r[i] ?? '').join(' | ')} |`
-    const header = padRow(rows[0])
-    const separator = `| ${Array.from({ length: colCount }, () => '---').join(' | ')} |`
-    const body = rows.slice(1).map(padRow).join('\n')
-    return `\n\n${header}\n${separator}${body ? `\n${body}` : ''}\n\n`
+
+    const rendered = rows
+      .map((tr) => {
+        const cells = Array.from(tr.querySelectorAll('th, td'))
+        const cellsHtml = cells
+          .map((cell) => {
+            const cellTag = cell.tagName.toLowerCase() === 'th' ? 'th' : 'td'
+            const content = Array.from(cell.childNodes).map(serializeCellNode).join('').trim()
+            return `<${cellTag}>${content || '<p></p>'}</${cellTag}>`
+          })
+          .join('')
+        return `<tr>${cellsHtml}</tr>`
+      })
+      .filter((row) => row !== '<tr></tr>')
+
+    if (rendered.length === 0) return ''
+    // HTML, not a Markdown pipe table: cells can then hold lists and line breaks.
+    return `\n\n<table><tbody>${rendered.join('')}</tbody></table>\n\n`
   }
 
   function serializeBlock(node: Node): string {
