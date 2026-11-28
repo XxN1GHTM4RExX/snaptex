@@ -19,6 +19,7 @@ from docx import Document
 from ocr_engine import process_image_with_gemini
 from blur_detector import calculate_blur_score
 from key_manager import provider_manager
+from exporter import apply_table_borders
 from database import (
     save_transcription,
     fetch_recent_transcriptions,
@@ -567,6 +568,9 @@ def _build_export_bytes(title: str, markdown_content: str, fmt: str) -> tuple[by
             format="markdown+tex_math_dollars",
             outputfile=tmp_docx_path
         )
+
+        # Pandoc emits tables without visible borders; force them in the XML.
+        apply_table_borders(tmp_docx_path)
 
         with open(tmp_docx_path, "rb") as f:
             docx_bytes = f.read()
