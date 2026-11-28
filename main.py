@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from typing import List, Tuple
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,6 +26,7 @@ from database import (
     save_transcription,
     fetch_recent_transcriptions,
     get_supabase_client,
+    count_recent_uploads,
     update_transcription_filename,
     update_transcription_content
 )
@@ -44,6 +46,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 MAX_PAGES = 5
 MAX_CONCURRENT_PAGES = 2
+DAILY_UPLOAD_LIMIT = 5  # successful transcriptions per rolling 24 h, per user
 
 
 class UpdateTranscriptionRequest(BaseModel):
@@ -375,6 +378,19 @@ async def process_document(
         auth_data = verify_token(authorization)
         token = auth_data["token"]
         user_id = auth_data["user_id"]
+
+        # T7: fail-open daily cap. Count saved transcriptions from the last 24 h;
+        # None from the DB helper means "could not check" -> allow the upload.
+        since_iso = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        used = count_recent_uploads(token, user_id, since_iso)
+        if used is not None and used >= DAILY_UPLOAD_LIMIT:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Daily upload limit reached ({DAILY_UPLOAD_LIMIT} per 24 hours). "
+                    "Please try again tomorrow."
+                ),
+            )
 
         if not files:
             raise HTTPException(status_code=400, detail="No files uploaded.")
