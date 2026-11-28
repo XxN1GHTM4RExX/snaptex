@@ -32,11 +32,28 @@ def apply_table_borders(docx_path: str):
             border.set(qn('w:color'), '000000')  # Solid black
             new_borders.append(border)
 
-        tblPr.append(new_borders)
+        # OOXML fixes child order: tblBorders must precede tblLook.
+        tblPr.insert_element_before(
+            new_borders,
+            'w:shd',
+            'w:tblLayout',
+            'w:tblCellMar',
+            'w:tblLook',
+            'w:tblCaption',
+            'w:tblDescription',
+        )
 
         for row in table.rows:
             trPr = row._tr.get_or_add_trPr()
-            trPr.append(OxmlElement('w:cantSplit'))
+            # And cantSplit must precede trHeight / tblHeader.
+            trPr.insert_element_before(
+                OxmlElement('w:cantSplit'),
+                'w:trHeight',
+                'w:tblHeader',
+                'w:tblCellSpacing',
+                'w:jc',
+                'w:hidden',
+            )
 
     doc.save(docx_path)
 
