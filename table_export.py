@@ -145,6 +145,14 @@ def html_table_to_grid(html: str) -> str:
             for line in cell:
                 col_w[i] = max(col_w[i], len(line))
 
+    # Pandoc maps these character widths proportionally onto the page. A column that
+    # happens to hold short text would then get a sliver of the width and Word breaks
+    # words mid-letter ("Sh ort ter m"). Floor every column near the average, and cap
+    # the longest so one cell cannot eat the table.
+    avg = sum(col_w) / len(col_w)
+    col_w = [max(w, int(avg * 0.85)) for w in col_w]
+    col_w = [min(w, int(avg * 2.2)) for w in col_w]
+
     def border(char: str) -> str:
         return "+" + "+".join(char * (w + 2) for w in col_w) + "+"
 
