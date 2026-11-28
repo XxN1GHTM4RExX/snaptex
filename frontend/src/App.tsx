@@ -32,26 +32,49 @@ function formatApiError(errData: any, fallback: string): string {
  * Word cannot render the SVG data URIs emitted by vtracer: pandoc embeds them
  * as .svg parts that silently disappear. PNG data URIs embed as real drawings,
  * so rasterize in the browser before posting the document for export.
+ *
+ * This keys on the URI itself, not the surrounding syntax, because the same
+ * diagram reaches export as Markdown `![](data:...)` outside tables and as a
+ * raw `<img src="data:...">` inside table cells (markdownBridge.serializeCellNode).
  */
 async function svgImagesToPng(markdown: string): Promise<string> {
-  const pattern = /!\[([^\]]*)\]\(data:image\/svg\+xml;base64,([A-Za-z0-9+/=]+)\)/g
-  const matches = Array.from(markdown.matchAll(pattern))
+  // group 1 = base64 payload; group 2 = percent-encoded / utf8 payload.
+  const uriPattern = /data:image\/svg\+xml(?:;base64,([A-Za-z0-9+/=]+)|,([^)"'\s]+))/gi
+  const matches = Array.from(markdown.matchAll(uriPattern))
   if (matches.length === 0) return markdown
 
   const pairs = await Promise.all(matches.map(async (m) => {
     try {
-      const bytes = Uint8Array.from(atob(m[2]), (c) => c.charCodeAt(0))
-      let svg = new TextDecoder().decode(bytes)
+      let svg: string
+      if (m[1]) {
+        const bytes = Uint8Array.from(atob(m[1]), (c) => c.charCodeAt(0))
+        svg = new TextDecoder().decode(bytes)
+      } else {
+        try { svg = decodeURIComponent(m[2]) } catch { svg = m[2] }
+      }
 
-      // The canvas needs intrinsic dimensions; vtracer SVGs may carry only a viewBox.
-      if (!/\swidth=/.test(svg.slice(0, 500))) {
-        const vb = svg.match(/viewBox\s*=\s*["']([^"']+)["']/)
-        if (vb) {
-          const nums = vb[1].trim().split(/[\s,]+/).map(Number)
-          const w = nums[2] || 800
-          const h = nums[3] || 800
-          svg = svg.replace(/<svg\b/, `<svg width="${w}" height="${h}"`)
-        }
+      // Force numeric intrinsic dimensions. A viewBox is authoritative; a
+      // non-numeric width (e.g. "100%") can otherwise yield naturalWidth 0,
+      // a blank canvas, or a drawImage throw.
+      let w = 800
+      let h = 600
+      const vb = svg.match(/viewBox\s*=\s*["']([^"']+)["']/i)
+      if (vb) {
+        const n = vb[1].trim().split(/[\s,]+/).map(Number)
+        if (n[2] > 0) w = Math.round(n[2])
+        if (n[3] > 0) h = Math.round(n[3])
+      }
+      const root = svg.match(/<svg\b[^>]*>/i)
+      if (root) {
+        const wm = root[0].match(/\bwidth\s*=\s*["']([\d.]+)(?:px)?["']/i)
+        const hm = root[0].match(/\bheight\s*=\s*["']([\d.]+)(?:px)?["']/i)
+        if (wm && +wm[1] > 0) w = Math.round(+wm[1])
+        if (hm && +hm[1] > 0) h = Math.round(+hm[1])
+        let open = root[0]
+          .replace(/\s+width\s*=\s*["'][^"']*["']/gi, '')
+          .replace(/\s+height\s*=\s*["'][^"']*["']/gi, '')
+        open = open.replace(/<svg\b/i, `<svg width="${w}" height="${h}"`)
+        svg = svg.replace(root[0], open)
       }
 
       const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }))
@@ -60,14 +83,14 @@ async function svgImagesToPng(markdown: string): Promise<string> {
         img.src = url
         await img.decode()
         const canvas = document.createElement('canvas')
-        canvas.width = img.naturalWidth || 800
-        canvas.height = img.naturalHeight || 800
+        canvas.width = img.naturalWidth || w
+        canvas.height = img.naturalHeight || h
         const ctx = canvas.getContext('2d')
         if (!ctx) throw new Error('canvas 2d context unavailable')
         ctx.fillStyle = '#ffffff'
         ctx.fillRect(0, 0, canvas.width, canvas.height)
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
-        return { from: m[0], to: `![${m[1]}](${canvas.toDataURL('image/png')})` }
+        return { from: m[0], to: canvas.toDataURL('image/png') }
       } finally {
         URL.revokeObjectURL(url)
       }
@@ -78,9 +101,14 @@ async function svgImagesToPng(markdown: string): Promise<string> {
   }))
 
   let out = markdown
+  let converted = 0
   for (const p of pairs) {
-    if (p.to !== p.from) out = out.split(p.from).join(p.to)
+    if (p.to !== p.from) {
+      out = out.split(p.from).join(p.to)
+      converted++
+    }
   }
+  console.info(`[export] rasterized ${converted}/${matches.length} SVG diagram(s)`)
   return out
 }
 
