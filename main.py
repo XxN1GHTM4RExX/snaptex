@@ -21,7 +21,7 @@ from ocr_engine import process_image_with_gemini
 from blur_detector import calculate_blur_score
 from key_manager import provider_manager
 from exporter import apply_table_borders
-from table_export import html_tables_to_grid_markdown
+from table_export import html_tables_to_grid_markdown, normalize_html_tables
 from database import (
     save_transcription,
     fetch_recent_transcriptions,
@@ -138,6 +138,10 @@ def _universal_latex_markdown_sanitizer(text: str | None) -> str | None:
     """Universally repairs LaTeX control chars, delimiters, un-delimited math lines, and Markdown tables."""
     if not text or not isinstance(text, str):
         return text
+
+    # 0. T9 regression: drop empty table cells and flatten nested list bullets
+    #    before any line-level math/table handling sees them.
+    text = normalize_html_tables(text)
 
     # 1. Recover LaTeX commands corrupted by ASCII control chars (\b, \f, \t, \r)
     text = text.replace("\x08", "\\b")

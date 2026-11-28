@@ -603,6 +603,28 @@ def render_tikz_diagram(raw_code: str) -> str:
     return None
 
 
+_TABLE_BOUNDS_RE = re.compile(r'\[TABLE_BOUNDS:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]', re.IGNORECASE)
+
+
+def _overlaps_bbox(box: list[int], others: list[list[int]], threshold: float = 0.5) -> bool:
+    """True if `box` overlaps any other box by more than `threshold` of its area.
+
+    Used to drop figure crops that cover a region the model declared as a table.
+    Input boxes are [ymin, xmin, ymax, xmax] in normalized 0-1000 coordinates.
+    """
+    y0, x0, y1, x1 = box
+    area = max(1, (y1 - y0) * (x1 - x0))
+    for oy0, ox0, oy1, ox1 in others:
+        iy0, ix0 = max(y0, oy0), max(x0, ox0)
+        iy1, ix1 = min(y1, oy1), min(x1, ox1)
+        if iy1 <= iy0 or ix1 <= ix0:
+            continue
+        overlap = (iy1 - iy0) * (ix1 - ix0) / area
+        if overlap >= threshold:
+            return True
+    return False
+
+
 def process_image_with_gemini(image_bytes: bytes, aggressive_whitening: bool = False) -> dict:
     image = Image.open(io.BytesIO(image_bytes))
 
@@ -612,7 +634,8 @@ def process_image_with_gemini(image_bytes: bytes, aggressive_whitening: bool = F
         "2. Convert mathematical expressions into standard LaTeX syntax using $...$ for inline math and $$...$$ for display math.\n"
         "3. Transcribe every table as HTML, never as a Markdown pipe table: <table><tr><td>...</td></tr></table>. Use <th> for header cells, and <ul><li>...</li></ul> for bulleted content inside a cell. One <tr> per row, one <td> per cell.\n"
         "4. Transcribe key-value metadata lists, technical spec fields, and labeled pairs (e.g., Trade Name, Manufacturer, Type Set, Power Supply) into explicit 2-column HTML tables (Property | Value) rather than stacked text.\n"
-        "5. A TABLE IS NEVER A FIGURE. Never emit a VECTOR_BW / VECTOR_COLOR / CROP_DIAGRAM tag, a bounding box, or a TikZ block for a table, and never reproduce a table as an image. Tables are always transcribed as HTML per rules 3-4.\n"
+        "5. A TABLE IS NEVER A FIGURE. Never emit a VECTOR_BW / VECTOR_COLOR / CROP_DIAGRAM tag, a bounding box, or a TikZ block for a table, and never reproduce a table as an image. Tables are always transcribed as HTML per rules 3-4. Emit `[TABLE_BOUNDS: ymin, xmin, ymax, xmax]` directly before each <table> block (normalized 0-1000 coordinates) so any duplicate figure crop can be rejected automatically.\n"
+        "5b. Inside a table cell use ONE flat level of <ul><li> siblings only. Never nest a <ul> inside an <li>. Do not emit empty trailing <td> cells.\n"
         "6. Classify every remaining visual figure, diagram, graph, or sketch (never a table) into the best matching tier below:\n"
         "   a. MECHANICAL DIAGRAMS, FORCE VECTORS, ELECTRICAL CIRCUITS, & GEOMETRIC SCHEMATICS:\n"
         "      ALWAYS use this tier for ANY circuit diagram (resistors, batteries, voltage sources, capacitors, inductors, current arrows) or physics schematic—NEVER use VECTOR_BW or CROP_DIAGRAM for circuits.\n"
@@ -631,14 +654,28 @@ def process_image_with_gemini(image_bytes: bytes, aggressive_whitening: bool = F
     raw_text = generate_with_multi_provider_fallback([image, prompt])
     cleaned_latex = raw_text
 
+    # T9 post-OCR guard: the model can still emit a figure for a table despite
+    # the prompt rule. Any figure whose box substantially covers a declared
+    # TABLE_BOUNDS region is dropped, then the metadata tags are stripped.
+    table_boxes = [[int(c) for c in m] for m in _TABLE_BOUNDS_RE.findall(cleaned_latex)]
+    if table_boxes:
+        print(f"[T9 guard] {len(table_boxes)} table region(s) declared; figure overlap filtering active.")
+        cleaned_latex = _TABLE_BOUNDS_RE.sub('', cleaned_latex)
+
     # 1. Process Tier 1: TikZ / CircuiTikZ blocks (Kroki standalone -> QuickLaTeX -> Vtracer B&W fallback)
     tikz_pattern = r'```(?:tikz|latex)\s*(.*?)\s*```'
     tikz_matches = re.findall(tikz_pattern, cleaned_latex, re.DOTALL)
 
     for code in tikz_matches:
         if "\\begin{tikzpicture}" in code or "\\begin{circuitikz}" in code:
-            rendered_uri = render_tikz_diagram(code)
             raw_block_re = re.compile(r'```(?:tikz|latex)\s*' + re.escape(code) + r'\s*```', re.DOTALL)
+            tikz_bounds = re.search(r'[%#]\s*BOUNDS:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)', code)
+            if tikz_bounds and table_boxes and _overlaps_bbox([int(c) for c in tikz_bounds.groups()], table_boxes):
+                print("[T9 guard] dropped TikZ block overlapping a declared table region.")
+                cleaned_latex = raw_block_re.sub('', cleaned_latex, count=1)
+                continue
+
+            rendered_uri = render_tikz_diagram(code)
 
             if rendered_uri:
                 replacement = f"\n\n![]({rendered_uri})\n\n"
@@ -657,24 +694,36 @@ def process_image_with_gemini(image_bytes: bytes, aggressive_whitening: bool = F
     bw_pattern = r'\[VECTOR_BW:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]'
     for match in re.findall(bw_pattern, cleaned_latex):
         coords = [int(c) for c in match]
-        svg_uri = vectorize_diagram_vtracer(image, coords, color_mode="binary")
         tag_re = re.compile(rf'\[VECTOR_BW:\s*{match[0]},\s*{match[1]},\s*{match[2]},\s*{match[3]}\]')
+        if table_boxes and _overlaps_bbox(coords, table_boxes):
+            print(f"[T9 guard] dropped VECTOR_BW figure at {coords} overlapping a declared table.")
+            cleaned_latex = tag_re.sub('', cleaned_latex, count=1)
+            continue
+        svg_uri = vectorize_diagram_vtracer(image, coords, color_mode="binary")
         cleaned_latex = tag_re.sub(lambda _: f"\n\n![]({svg_uri})\n\n", cleaned_latex, count=1)
 
     # 3. Process Tier 3: Color Vector Tracing (Vtracer color mode)
     color_pattern = r'\[VECTOR_COLOR:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]'
     for match in re.findall(color_pattern, cleaned_latex):
         coords = [int(c) for c in match]
-        svg_uri = vectorize_diagram_vtracer(image, coords, color_mode="color")
         tag_re = re.compile(rf'\[VECTOR_COLOR:\s*{match[0]},\s*{match[1]},\s*{match[2]},\s*{match[3]}\]')
+        if table_boxes and _overlaps_bbox(coords, table_boxes):
+            print(f"[T9 guard] dropped VECTOR_COLOR figure at {coords} overlapping a declared table.")
+            cleaned_latex = tag_re.sub('', cleaned_latex, count=1)
+            continue
+        svg_uri = vectorize_diagram_vtracer(image, coords, color_mode="color")
         cleaned_latex = tag_re.sub(lambda _: f"\n\n![]({svg_uri})\n\n", cleaned_latex, count=1)
 
     # 4. Process Tier 4: OpenCV Whitening Crop
     crop_pattern = r'\[CROP_DIAGRAM:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]'
     for match in re.findall(crop_pattern, cleaned_latex):
         coords = [int(c) for c in match]
-        b64_img = crop_and_clean_diagram(image, coords, aggressive_whitening=aggressive_whitening)
         tag_re = re.compile(rf'\[CROP_DIAGRAM:\s*{match[0]},\s*{match[1]},\s*{match[2]},\s*{match[3]}\]')
+        if table_boxes and _overlaps_bbox(coords, table_boxes):
+            print(f"[T9 guard] dropped CROP_DIAGRAM figure at {coords} overlapping a declared table.")
+            cleaned_latex = tag_re.sub('', cleaned_latex, count=1)
+            continue
+        b64_img = crop_and_clean_diagram(image, coords, aggressive_whitening=aggressive_whitening)
         cleaned_latex = tag_re.sub(lambda _: f"\n\n![]({b64_img})\n\n", cleaned_latex, count=1)
 
     return {
